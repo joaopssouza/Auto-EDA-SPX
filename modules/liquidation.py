@@ -215,13 +215,145 @@ def _fetch_via_browser(driver, url: str) -> dict:
     return json.loads(result_str)
 
 
+def _fetch_page_http(
+    session,
+    start_ts: int,
+    end_ts: int,
+    page: int,
+    count_per_page: int,
+) -> Optional[tuple[list[dict], int]]:
+    """
+    Tenta buscar página via HTTP direto com sessão autenticada.
+    Retorna (eo_list_processada, total_esperado) ou None se falhar.
+    """
+    try:
+        api_path = LIQUIDATION["api_url"]
+        reason_id = LIQUIDATION["reason_id"]
+        
+        params = {
+            "reason_id": reason_id,
+            "resolve_time": f"{start_ts},{end_ts}",
+            "start_resolve_time": start_ts,
+            "end_resolve_time": end_ts,
+            "pageno": page,
+            "count": count_per_page,
+        }
+        
+        data = session.get(api_path, params=params)
+        
+        if not isinstance(data, dict):
+            console.print(f"[yellow]⚠️ Página {page}: resposta inesperada (HTTP direto)[/yellow]")
+            return None
+        
+        # Verifica erros de autenticação
+        api_error = data.get("error", 0)
+        is_login = data.get("is_login", True)
+        
+        if api_error != 0 or not is_login:
+            console.print(
+                f"[yellow]⚠️ Página {page}: error={api_error}, is_login={is_login} (HTTP direto)[/yellow]"
+            )
+            return None
+        
+        retcode = data.get("retcode", 0)
+        if retcode != 0:
+            console.print(
+                f"[yellow]⚠️ Página {page}: retcode={retcode} (HTTP direto)[/yellow]"
+            )
+            return None
+        
+        data_wrapper = data.get("data", {})
+        eo_list = data_wrapper.get("eo_list", [])
+        total_expected = data_wrapper.get("total", 0)
+        
+        if not eo_list:
+            return [], total_expected
+        
+        # Extrai apenas os campos necessários
+        filtered = [_extract_fields(item) for item in eo_list]
+        return filtered, total_expected
+    
+    except Exception as e:
+        console.print(f"[dim]  Página {page}: falha HTTP direto ({e})[/dim]")
+        return None
+
+
+def _fetch_page_selenium(
+    driver,
+    start_ts: int,
+    end_ts: int,
+    page: int,
+    count_per_page: int,
+) -> Optional[tuple[list[dict], int]]:
+    """
+    Tenta buscar página via Selenium (fallback de HTTP direto).
+    Retorna (eo_list_processada, total_esperado) ou None se falhar.
+    """
+    try:
+        base_url = SPX_BASE_URL
+        api_path = LIQUIDATION["api_url"]
+        reason_id = LIQUIDATION["reason_id"]
+        
+        url = (
+            f"{base_url}{api_path}"
+            f"?reason_id={reason_id}"
+            f"&resolve_time={start_ts},{end_ts}"
+            f"&start_resolve_time={start_ts}"
+            f"&end_resolve_time={end_ts}"
+            f"&pageno={page}"
+            f"&count={count_per_page}"
+        )
+        
+        data = _fetch_via_browser(driver, url)
+        
+        if not isinstance(data, dict):
+            console.print(f"[red]Página {page}: resposta inesperada (Selenium)[/red]")
+            return None
+        
+        # Verifica erros de autenticação
+        api_error = data.get("error", 0)
+        is_login = data.get("is_login", True)
+        
+        if api_error != 0 or not is_login:
+            console.print(
+                f"[red]❌ Página {page}: error={api_error}, is_login={is_login} (Selenium)[/red]"
+            )
+            return None
+        
+        retcode = data.get("retcode", 0)
+        if retcode != 0:
+            console.print(
+                f"[red]Página {page}: retcode={retcode} (Selenium)[/red]"
+            )
+            return None
+        
+        data_wrapper = data.get("data", {})
+        eo_list = data_wrapper.get("eo_list", [])
+        total_expected = data_wrapper.get("total", 0)
+        
+        if not eo_list:
+            return [], total_expected
+        
+        # Extrai apenas os campos necessários
+        filtered = [_extract_fields(item) for item in eo_list]
+        return filtered, total_expected
+    
+    except Exception as e:
+        console.print(f"[red]❌ Página {page}: falha Selenium ({e})[/red]")
+        return None
+
+
 def fetch_liquidation_orders(
+    session,
     driver,
     start_date: datetime,
     end_date: datetime,
     count_per_page: int = None,
 ) -> list[dict]:
-    """Busca dados de EO List (ER48) com paginação automática."""
+    """
+    Busca dados de EO List (ER48) com fallback HTTP->Selenium.
+    Tenta HTTP direto primeiro; se falhar, usa Selenium.
+    """
     count_per_page = count_per_page or LIQUIDATION["page_size"]
 
     start_ts, end_ts = get_time_range(start_date, end_date)
@@ -232,12 +364,9 @@ def fetch_liquidation_orders(
         f"até {datetime.fromtimestamp(end_ts, tz=BRT).strftime('%d/%m/%Y %H:%M')}"
     )
 
-    base_url = SPX_BASE_URL
-    api_path = LIQUIDATION["api_url"]
-    reason_id = LIQUIDATION["reason_id"]
-
     all_data: list[dict] = []
     page = 1
+    use_selenium = False  # Iniciar com HTTP; trocar para Selenium se necessário
 
     with Progress(
         SpinnerColumn(),
@@ -247,69 +376,53 @@ def fetch_liquidation_orders(
         task = progress.add_task("Extraindo dados...", total=None)
 
         while page <= MAX_PAGES:
-            url = (
-                f"{base_url}{api_path}"
-                f"?reason_id={reason_id}"
-                f"&resolve_time={start_ts},{end_ts}"
-                f"&start_resolve_time={start_ts}"
-                f"&end_resolve_time={end_ts}"
-                f"&pageno={page}"
-                f"&count={count_per_page}"
-            )
-
             try:
-                data = _fetch_via_browser(driver, url)
-
-                if not isinstance(data, dict):
-                    console.print(f"[red]Resposta inesperada: {type(data)}[/red]")
-                    break
-
-                # Verifica erros de autenticação
-                api_error = data.get("error", 0)
-                is_login = data.get("is_login", True)
-
-                if api_error != 0 or not is_login:
-                    console.print(
-                        f"[red]❌ Erro API (error={api_error}, is_login={is_login})[/red]"
+                # Primeira tentativa: HTTP direto
+                if not use_selenium:
+                    result = _fetch_page_http(session, start_ts, end_ts, page, count_per_page)
+                    
+                    if result is not None:
+                        eo_list, total_expected = result
+                        console.print(f"[green]✅ Página {page}: HTTP direto OK[/green]")
+                        all_data.extend(eo_list)
+                        progress.update(
+                            task,
+                            description=f"Página {page}: {len(all_data)}/{total_expected}",
+                        )
+                        if len(all_data) >= total_expected:
+                            break
+                        page += 1
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        # Falhou HTTP, ativar Selenium e tentar novamente
+                        console.print(f"[yellow]⚠️ HTTP direto falhou. Ativando Selenium...[/yellow]")
+                        use_selenium = True
+                
+                # Segunda tentativa ou Selenium direto
+                result = _fetch_page_selenium(driver, start_ts, end_ts, page, count_per_page)
+                
+                if result is not None:
+                    eo_list, total_expected = result
+                    console.print(f"[green]✅ Página {page}: Selenium OK[/green]")
+                    all_data.extend(eo_list)
+                    progress.update(
+                        task,
+                        description=f"Página {page}: {len(all_data)}/{total_expected}",
                     )
-                    raise SessionExpiredError(
-                        f"API retornou error={api_error}, is_login={is_login}. "
-                        "Sessão do browser inválida."
-                    )
-
-                retcode = data.get("retcode", 0)
-                if retcode != 0:
-                    console.print(
-                        f"[red]Erro API retcode: {data.get('message', 'desconhecido')}[/red]"
-                    )
+                    if len(all_data) >= total_expected:
+                        break
+                    page += 1
+                    time.sleep(0.5)
+                else:
+                    # Selenium também falhou
+                    console.print(f"[red]❌ Falha em ambas as tentativas (HTTP e Selenium)[/red]")
                     break
-
-                data_wrapper = data.get("data", {})
-                eo_list = data_wrapper.get("eo_list", [])
-                total_expected = data_wrapper.get("total", 0)
-
-                if not eo_list:
-                    break
-
-                # Extrai apenas os campos necessários
-                filtered = [_extract_fields(item) for item in eo_list]
-                all_data.extend(filtered)
-
-                progress.update(
-                    task,
-                    description=f"Página {page}: {len(all_data)}/{total_expected}",
-                )
-
-                if len(all_data) >= total_expected:
-                    break
-
-                page += 1
-                time.sleep(0.5)  # Rate limiting entre páginas
 
             except SessionExpiredError:
                 raise
             except Exception as e:
-                console.print(f"[red]❌ Erro na página {page}: {e}[/red]")
+                console.print(f"[red]❌ Erro crítico na página {page}: {e}[/red]")
                 break
 
     console.print(f"[green]  → {len(all_data)} registros extraídos[/green]")
@@ -526,7 +639,7 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
                 f"{current_end.strftime('%d/%m %H:%M')}[/bold]"
             )
 
-            chunk_data = fetch_liquidation_orders(driver, current_start, current_end)
+            chunk_data = fetch_liquidation_orders(session, driver, current_start, current_end)
 
             if chunk_data:
                 all_data.extend(chunk_data)
