@@ -66,6 +66,12 @@ RECEBIMENTO_SOC = {
     "days_ago_start": 30,
     "days_ago_end": 6,
     "page_size": 1665,
+    "max_workers": 5,
+    "probe_threshold": 5,
+    "batch_size_pages": 20,
+    "delay_between_batches": 1.0,
+    "max_retry_attempts": 3,
+    "retry_backoff_base": 1.3,
 }
 
 # Escalation Ticket

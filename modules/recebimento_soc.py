@@ -7,8 +7,11 @@ Operação: POST de Recebimento SOC.
 """
 
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from math import ceil
 from pathlib import Path
 from typing import Any
+import time
 
 from rich.console import Console
 
@@ -153,6 +156,69 @@ ORDER_ACCOUNT_MAP = {
 _BASE_STATUS_MAPPING_CACHE: dict[str, str] | None = None
 
 
+def _extract_items_and_total(response: Any) -> tuple[list[dict], int | None, str | None]:
+    """Normaliza resposta da API em (itens, total, erro)."""
+    if not isinstance(response, dict):
+        return [], None, f"Resposta inesperada: {type(response)}"
+
+    retcode = response.get("retcode", -1)
+    if retcode != 0:
+        return [], None, response.get("message", "desconhecido")
+
+    data_wrapper = response.get("data", response)
+    if isinstance(data_wrapper, dict):
+        items = data_wrapper.get("list", data_wrapper.get("tracking_list", []))
+        total_raw = data_wrapper.get("total", data_wrapper.get("total_count", None))
+    elif isinstance(data_wrapper, list):
+        items = data_wrapper
+        total_raw = len(items)
+    else:
+        items = []
+        total_raw = None
+
+    total_int: int | None = None
+    if isinstance(total_raw, int):
+        total_int = total_raw
+    elif isinstance(total_raw, str) and total_raw.isdigit():
+        total_int = int(total_raw)
+
+    return items if isinstance(items, list) else [], total_int, None
+
+
+def _fetch_page_with_retry(
+    session,
+    api_url: str,
+    base_body: dict[str, Any],
+    page: int,
+    max_retry_attempts: int,
+    retry_backoff_base: float,
+) -> tuple[int, list[dict], int | None, str | None]:
+    """Busca uma página com retry local para retcode/erros temporários."""
+    for attempt in range(1, max_retry_attempts + 1):
+        body = dict(base_body)
+        body["page_no"] = page
+
+        try:
+            response = session.post(api_url, json_data=body)
+            items, total, error = _extract_items_and_total(response)
+            if error is None:
+                return page, items, total, None
+
+            if attempt < max_retry_attempts:
+                sleep_for = retry_backoff_base ** attempt
+                time.sleep(sleep_for)
+            else:
+                return page, [], None, error
+        except Exception as exc:
+            if attempt < max_retry_attempts:
+                sleep_for = retry_backoff_base ** attempt
+                time.sleep(sleep_for)
+            else:
+                return page, [], None, str(exc)
+
+    return page, [], None, "falha desconhecida"
+
+
 def get_time_range(days_ago_start: int, days_ago_end: int) -> tuple[int, int]:
     """Calcula o range de timestamps."""
     now = datetime.now(BRT)
@@ -182,54 +248,140 @@ def fetch_recebimento_soc(
     end_date = datetime.fromtimestamp(end_ts, tz=BRT)
     console.print(f"  Período: {start_date.strftime('%d/%m/%Y %H:%M')} até {end_date.strftime('%d/%m/%Y %H:%M')}")
     
-    all_data = []
-    page = 1
-    total_expected = None
-    
-    while page <= MAX_PAGES:
-        body = {
-            "current_station_received_time": f"{start_ts},{end_ts}",
-            "current_station_ids": RECEBIMENTO_SOC["station_id"],
-            "order_status": RECEBIMENTO_SOC["order_status"],
-            "count": count_per_page,
-            "page_no": page
-        }
-        
-        try:
-            response = session.post(RECEBIMENTO_SOC["api_url"], json_data=body)
-            
-            if isinstance(response, dict):
-                retcode = response.get("retcode", -1)
-                if retcode != 0:
-                    console.print(f"[red]Erro API: {response.get('message', 'desconhecido')}[/red]")
-                    break
-                
-                data_wrapper = response.get("data", response)
-                
-                if isinstance(data_wrapper, dict):
-                    items = data_wrapper.get("list", data_wrapper.get("tracking_list", []))
-                    total_expected = data_wrapper.get("total", data_wrapper.get("total_count", 0))
-                else:
-                    items = data_wrapper if isinstance(data_wrapper, list) else []
-                    total_expected = len(items)
-            else:
-                console.print(f"[red]Resposta inesperada: {type(response)}[/red]")
+    max_workers = max(1, int(RECEBIMENTO_SOC.get("max_workers", 5)))
+    probe_threshold = max(2, int(RECEBIMENTO_SOC.get("probe_threshold", 5)))
+    batch_size_pages = max(1, int(RECEBIMENTO_SOC.get("batch_size_pages", 20)))
+    delay_between_batches = max(0.0, float(RECEBIMENTO_SOC.get("delay_between_batches", 1.0)))
+    max_retry_attempts = max(1, int(RECEBIMENTO_SOC.get("max_retry_attempts", 3)))
+    retry_backoff_base = max(1.1, float(RECEBIMENTO_SOC.get("retry_backoff_base", 1.3)))
+
+    api_url = RECEBIMENTO_SOC["api_url"]
+    base_body = {
+        "current_station_received_time": f"{start_ts},{end_ts}",
+        "current_station_ids": RECEBIMENTO_SOC["station_id"],
+        "order_status": RECEBIMENTO_SOC["order_status"],
+        "count": count_per_page,
+    }
+
+    # Sonda inicial para descobrir total e decidir estratégia de execução.
+    page, items, total_expected, error = _fetch_page_with_retry(
+        session,
+        api_url,
+        base_body,
+        page=1,
+        max_retry_attempts=max_retry_attempts,
+        retry_backoff_base=retry_backoff_base,
+    )
+    if error:
+        console.print(f"[red]❌ Erro na página {page}: {error}[/red]")
+        return []
+
+    if not items:
+        console.print("\n[bold green]✅ Total extraído: 0 registros[/bold green]")
+        return []
+
+    all_data = list(items)
+    console.print(f"  Página 1: +{len(items)} ({len(all_data)}/{total_expected or '?'})")
+
+    if not total_expected or len(all_data) >= total_expected:
+        console.print(f"\n[bold green]✅ Total extraído: {len(all_data)} registros[/bold green]")
+        return all_data
+
+    total_pages = min(MAX_PAGES, max(1, ceil(total_expected / count_per_page)))
+
+    # Fallback sequencial para volume baixo ou quando paralelo estiver desativado.
+    if max_workers == 1 or total_pages < probe_threshold:
+        for current_page in range(2, total_pages + 1):
+            _, page_items, _, page_error = _fetch_page_with_retry(
+                session,
+                api_url,
+                base_body,
+                page=current_page,
+                max_retry_attempts=max_retry_attempts,
+                retry_backoff_base=retry_backoff_base,
+            )
+            if page_error:
+                console.print(f"[red]❌ Erro na página {current_page}: {page_error}[/red]")
+                continue
+
+            if not page_items:
                 break
-            
-            if not items:
-                break
-            
-            all_data.extend(items)
-            console.print(f"  Página {page}: +{len(items)} ({len(all_data)}/{total_expected})")
-            
-            if len(all_data) >= total_expected:
-                break
-            
-            page += 1
-            
-        except Exception as e:
-            console.print(f"[red]❌ Erro na página {page}: {e}[/red]")
-            break
+
+            all_data.extend(page_items)
+            console.print(f"  Página {current_page}: +{len(page_items)} ({len(all_data)}/{total_expected})")
+
+        console.print(f"\n[bold green]✅ Total extraído: {len(all_data)} registros[/bold green]")
+        return all_data
+
+    pages_to_fetch = list(range(2, total_pages + 1))
+    console.print(
+        f"[cyan]Paralelismo ativo: {max_workers} workers, {len(pages_to_fetch)} páginas restantes.[/cyan]"
+    )
+
+    failed_pages: list[int] = []
+
+    for start_idx in range(0, len(pages_to_fetch), batch_size_pages):
+        batch_pages = pages_to_fetch[start_idx:start_idx + batch_size_pages]
+        batch_results: dict[int, list[dict]] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _fetch_page_with_retry,
+                    session,
+                    api_url,
+                    base_body,
+                    page_no,
+                    max_retry_attempts,
+                    retry_backoff_base,
+                ): page_no
+                for page_no in batch_pages
+            }
+
+            for future in as_completed(futures):
+                page_no = futures[future]
+                try:
+                    _, page_items, _, page_error = future.result()
+                    if page_error:
+                        failed_pages.append(page_no)
+                        console.print(f"[yellow]⚠️ Página {page_no} com erro: {page_error}[/yellow]")
+                        continue
+                    batch_results[page_no] = page_items
+                except Exception as exc:
+                    failed_pages.append(page_no)
+                    console.print(f"[yellow]⚠️ Página {page_no} falhou no worker: {exc}[/yellow]")
+
+        for page_no in sorted(batch_results.keys()):
+            page_items = batch_results[page_no]
+            if page_items:
+                all_data.extend(page_items)
+
+        console.print(
+            f"  Lote de páginas {batch_pages[0]}-{batch_pages[-1]} concluído "
+            f"({len(all_data)}/{total_expected})"
+        )
+
+        if delay_between_batches > 0 and start_idx + batch_size_pages < len(pages_to_fetch):
+            time.sleep(delay_between_batches)
+
+    if failed_pages:
+        console.print(
+            f"[yellow]⚠️ Reprocessando {len(failed_pages)} páginas com falha em modo sequencial...[/yellow]"
+        )
+        for page_no in sorted(set(failed_pages)):
+            _, page_items, _, page_error = _fetch_page_with_retry(
+                session,
+                api_url,
+                base_body,
+                page=page_no,
+                max_retry_attempts=max_retry_attempts,
+                retry_backoff_base=retry_backoff_base,
+            )
+            if page_error:
+                console.print(f"[red]❌ Página {page_no} permaneceu com erro: {page_error}[/red]")
+                continue
+            if page_items:
+                all_data.extend(page_items)
     
     console.print(f"\n[bold green]✅ Total extraído: {len(all_data)} registros[/bold green]")
     return all_data
