@@ -35,13 +35,14 @@ jobs:
       CHROME_USER_DATA: /tmp/chrome
       CHROME_PROFILE: Default
       PYTHONUNBUFFERED: '1'
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
     steps:
       - name: Checkout do repositório
-        uses: actions/checkout@v4
+          uses: actions/checkout@v4.2.0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+          uses: actions/setup-python@v5.2.0
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -97,7 +98,9 @@ jobs:
 
           echo "Horário Brasília (BRT): ${BRT_HOUR}:${BRT_MIN}, Dia da Semana: ${BRT_DAY}"
           
-          # 2. Executar Módulos Sequencialmente (sem --auth no CI)
+          echo "🚀 Iniciando atualização de Workstation..."
+          python main.py --workstation
+
           echo "🚀 Iniciando extração de Exception Orders..."
           python main.py --exception
           
@@ -107,14 +110,11 @@ jobs:
           echo "🚀 Iniciando extração de Outbound..."
           python main.py --outbound
 
-          echo "⏳ Cooldown de 10s antes do Workstation..."
-          sleep 10
-
-          echo "🚀 Iniciando atualização de Workstation..."
-          python main.py --workstation
-
           echo "🚀 Iniciando extração de Recebimento SOC..."
           python main.py --recebimento
+
+          echo "⏳ Cooldown de 10s antes do Workstation..."
+          sleep 03
 
           echo "🚀 Iniciando extração de Escalation Ticket..."
           python main.py --escalation
