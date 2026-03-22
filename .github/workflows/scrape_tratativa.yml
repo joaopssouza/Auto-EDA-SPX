@@ -1,0 +1,111 @@
+name: Automação Monitoramento RTS - Agendamentos Modulares
+
+on:
+  schedule:
+    # Gatilho de 30 em 30 minutos
+    - cron: '*/30 * * * *'
+    
+  workflow_dispatch:  # Permite execução manual pelo botão no GitHub
+
+concurrency:
+  group: scrape-tratativa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+      GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+      SPX_BASE_URL: ${{ secrets.SPX_BASE_URL }}
+      SPX_API_TRACKING_LIST_SEARCH: ${{ secrets.SPX_API_TRACKING_LIST_SEARCH }}
+      SPX_API_TRACKING_INFO: ${{ secrets.SPX_API_TRACKING_INFO }}
+      SPX_API_ESCALATION_TICKET: ${{ secrets.SPX_API_ESCALATION_TICKET }}
+      SPX_API_EXCEPTION_ORDER_HISTORY: ${{ secrets.SPX_API_EXCEPTION_ORDER_HISTORY }}
+      SPX_API_EXCEPTION_HANDLING_EO_LIST: ${{ secrets.SPX_API_EXCEPTION_HANDLING_EO_LIST }}
+      SPX_API_WFM_DASHBOARD: ${{ secrets.SPX_API_WFM_DASHBOARD }}
+      ONLINE_SOC_SPREADSHEET_ID: ${{ vars.ONLINE_SOC_SPREADSHEET_ID }}
+      ONLINE_SOC_BASE_STATUS_SPREADSHEET_ID: ${{ vars.ONLINE_SOC_BASE_STATUS_SPREADSHEET_ID }}
+      CHROME_USER_DATA: /tmp/chrome
+      CHROME_PROFILE: Default
+      PYTHONUNBUFFERED: '1'
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Preparar runtime
+        run: |
+          mkdir -p "$CHROME_USER_DATA"
+          # Sessao de login (OAuth/cookies) vem da planilha CONFIG_CLOUD.
+          echo "☁️ Sessão de autenticação será carregada do CONFIG_CLOUD."
+
+      - name: Executar Extração (A cada 30 min)
+        run: |
+          set -e
+          # Detecta hora local de Sao Paulo explicitamente via timezone
+          BRT_HOUR=$(TZ=America/Sao_Paulo date +%H)
+          BRT_MIN=$(TZ=America/Sao_Paulo date +%M)
+          BRT_DAY=$(TZ=America/Sao_Paulo date +%u)
+
+          echo "Horário Brasília (BRT): ${BRT_HOUR}:${BRT_MIN}, Dia da Semana: ${BRT_DAY}"
+
+          # 1. Regra de Domingo: Pausa entre 08:00 e 20:59 BRT
+          if [ "$BRT_DAY" == "7" ] && [ "$BRT_HOUR" -ge 8 ] && [ "$BRT_HOUR" -lt 21 ]; then
+            echo "Janela de manutenção de Domingo (08:00 - 21:00 BRT). Encerrando."
+            exit 0
+          fi
+          
+          # 2. Executar Módulos Sequencialmente (sem --auth no CI)
+          echo "🚀 Iniciando extração de Exception Orders..."
+          python main.py --exception
+          
+          echo "🚀 Iniciando extração de Inbound..."
+          python main.py --inbound
+          
+          echo "🚀 Iniciando extração de Outbound..."
+          python main.py --outbound
+
+          echo "⏳ Cooldown de 10s antes do Workstation..."
+          sleep 10
+
+          echo "🚀 Iniciando atualização de Workstation..."
+          python main.py --workstation
+
+          echo "🚀 Iniciando extração de Recebimento SOC..."
+          python main.py --recebimento
+
+          echo "🚀 Iniciando extração de Escalation Ticket..."
+          python main.py --escalation
+
+          # Executa o Pipeline SPX a cada 2 horas (horas pares)
+          # A verificação "-lt 30" assegura que rode apenas no gatilho do início da hora,
+          # e não no gatilho dos 30 minutos (já que o cron roda a cada 30 min).
+          if [ $((10#$BRT_HOUR % 2)) -eq 0 ] && [ $((10#$BRT_MIN)) -lt 30 ]; then
+            echo "🚀 Iniciando Pipeline SPX (Liquidation + Duplicados + Status)..."
+            python main.py --pipeline-spx
+          else
+            echo "⏸️ Ignorando Pipeline SPX (Agendado para horas pares, HH:00)."
+          fi
+
+      - name: Limpar arquivos temporários
+        if: always()
+        run: |
+          rm -rf "$CHROME_USER_DATA"
+          rm -f "$RUNNER_TEMP/spx_session_cache.json"
+

@@ -1,0 +1,39 @@
+# Monitoramento RTS - Sistema de Raspagem via APIs
+
+# Ambiente
+.env
+*.env.*
+
+# Credenciais (NUNCA commitar!)
+config/credentials.json
+Credentials.json
+service_account.json
+service_account.local.json
+cookies.json
+oauth_client_secret.json
+oauth_token.json
+google_session_cookies.json
+*.pem
+*.key
+
+# Output de dados
+output/
+logs/
+.runtime/
+auth_error.png
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+chrome_profile/
+
+# Operação local (não versionar)
+MANUAL_OPERACAO_LOCAL.md
+README_LOCAL.md

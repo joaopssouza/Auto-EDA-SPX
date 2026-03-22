@@ -1,0 +1,38 @@
+# Dependências - Monitoramento RTS
+
+# HTTP Client
+httpx>=0.25.0
+
+# Automação de Browser (para login inicial)
+playwright>=1.40.0
+playwright-stealth>=1.0.6
+
+# Ambiente e configuração
+python-dotenv>=1.0.0
+
+# Criptografia de credenciais
+cryptography>=41.0.0
+
+# Processamento de dados
+pandas>=2.0.0
+pytz>=2024.1
+
+# Google Sheets
+gspread>=5.0.0
+google-auth>=2.0.0
+google-api-python-client>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+
+# Retry e resiliência
+tenacity>=8.0.0
+
+# Logs estruturados
+rich>=13.0.0
+
+# Automação Web
+selenium>=4.15.0
+webdriver-manager>=4.0.0
+
+# SSL Fix Windows
+pip-system-certs
