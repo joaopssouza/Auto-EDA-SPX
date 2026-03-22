@@ -64,12 +64,6 @@ jobs:
           BRT_DAY=$(TZ=America/Sao_Paulo date +%u)
 
           echo "Horário Brasília (BRT): ${BRT_HOUR}:${BRT_MIN}, Dia da Semana: ${BRT_DAY}"
-
-          # 1. Regra de Domingo: Pausa entre 08:00 e 20:59 BRT
-          if [ "$BRT_DAY" == "7" ] && [ "$BRT_HOUR" -ge 8 ] && [ "$BRT_HOUR" -lt 21 ]; then
-            echo "Janela de manutenção de Domingo (08:00 - 21:00 BRT). Encerrando."
-            exit 0
-          fi
           
           # 2. Executar Módulos Sequencialmente (sem --auth no CI)
           echo "🚀 Iniciando extração de Exception Orders..."
