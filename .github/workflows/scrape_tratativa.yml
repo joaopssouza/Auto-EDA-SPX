@@ -15,6 +15,7 @@ jobs:
   run-sync:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    environment: env
     permissions:
       contents: read
     env:
