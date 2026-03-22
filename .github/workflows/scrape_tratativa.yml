@@ -28,6 +28,7 @@ jobs:
       SPX_API_EXCEPTION_ORDER_HISTORY: ${{ secrets.SPX_API_EXCEPTION_ORDER_HISTORY }}
       SPX_API_EXCEPTION_HANDLING_EO_LIST: ${{ secrets.SPX_API_EXCEPTION_HANDLING_EO_LIST }}
       SPX_API_WFM_DASHBOARD: ${{ secrets.SPX_API_WFM_DASHBOARD }}
+      SPX_API_WORKSTATION_ASSIGNMENT_HISTORY: ${{ secrets.SPX_API_WORKSTATION_ASSIGNMENT_HISTORY }}
       ONLINE_SOC_SPREADSHEET_ID: ${{ vars.ONLINE_SOC_SPREADSHEET_ID }}
       ONLINE_SOC_BASE_STATUS_SPREADSHEET_ID: ${{ vars.ONLINE_SOC_BASE_STATUS_SPREADSHEET_ID }}
       CHROME_USER_DATA: /tmp/chrome
@@ -43,6 +44,36 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+
+      - name: Validar secrets obrigatórias
+        run: |
+          set -e
+          required=(
+            GOOGLE_SHEETS_ID
+            GOOGLE_SERVICE_ACCOUNT
+            SPX_BASE_URL
+            SPX_API_TRACKING_LIST_SEARCH
+            SPX_API_TRACKING_INFO
+            SPX_API_ESCALATION_TICKET
+            SPX_API_EXCEPTION_ORDER_HISTORY
+            SPX_API_EXCEPTION_HANDLING_EO_LIST
+            SPX_API_WFM_DASHBOARD
+            SPX_API_WORKSTATION_ASSIGNMENT_HISTORY
+          )
+
+          missing=()
+          for var in "${required[@]}"; do
+            if [ -z "${!var}" ]; then
+              missing+=("$var")
+            fi
+          done
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "❌ Secrets/vars obrigatórias ausentes: ${missing[*]}"
+            exit 1
+          fi
+
+          echo "✅ Secrets/vars obrigatórias presentes."
 
       - name: Instalar dependências
         run: |

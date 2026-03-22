@@ -36,7 +36,7 @@ def _read_env(name: str, default: str = "") -> str:
     return value.strip()
 
 
-SPX_BASE_URL = _read_env("SPX_BASE_URL", "https://spx.shopee.com.br")
+SPX_BASE_URL = _read_env("SPX_BASE_URL")
 
 # Sec tokens
 SAP_RI_INBOUND = os.getenv("SPX_SAP_RI_INBOUND", os.getenv("SPX_SAP_RI", ""))
@@ -61,7 +61,8 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 # Recebimento SOC
 RECEBIMENTO_SOC = {
     "station_id": "6042",  # SOC_MG_BETIM
-    "order_status": "1,8,10,18,33,36,9,61,65,64,60,61,64,124,153,460,550,58,613,612,615,614,611,610,616,629,574,575,650,648,751,646,571,581,5,570,657,630",    "api_url": _read_env("SPX_API_TRACKING_LIST_SEARCH", "/api/fleet_order/order/tracking_list/search"),
+    "order_status": "1,8,10,18,33,36,9,61,65,64,60,61,64,124,153,460,550,58,613,612,615,614,611,610,616,629,574,575,650,648,751,646,571,581,5,570,657,630",
+    "api_url": _read_env("SPX_API_TRACKING_LIST_SEARCH"),
     "days_ago_start": 30,
     "days_ago_end": 6,
     "page_size": 1665,
@@ -69,19 +70,19 @@ RECEBIMENTO_SOC = {
 
 # Escalation Ticket
 ESCALATION_TICKET = {
-    "api_url": _read_env("SPX_API_ESCALATION_TICKET", "/ticketcenter-api/escalation_ticket/station/all_ticket/list"),
+    "api_url": _read_env("SPX_API_ESCALATION_TICKET"),
     "days_ago": 30,
 }
 
 # Exception Orders
 EXCEPTION_ORDERS = {
-    "api_url": _read_env("SPX_API_EXCEPTION_ORDER_HISTORY", "/exception-api/admin/soc/order/history"),
+    "api_url": _read_env("SPX_API_EXCEPTION_ORDER_HISTORY"),
     "days_ago": 1,
 }
 
 # Liquidation (EO List - ER48)
 LIQUIDATION = {
-    "api_url": _read_env("SPX_API_EXCEPTION_HANDLING_EO_LIST", "/exception-api/admin/soc/exception_handling/eo_list"),
+    "api_url": _read_env("SPX_API_EXCEPTION_HANDLING_EO_LIST"),
     "reason_id": "ER48",
     "days_ago": 60,
     "page_size": 24,
@@ -89,19 +90,25 @@ LIQUIDATION = {
 
 # Inbound
 INBOUND = {
-    "api_url": _read_env("SPX_API_WFM_DASHBOARD", "/api/wfm/admin/dashboard/list"),
+    "api_url": _read_env("SPX_API_WFM_DASHBOARD"),
     "scan_type": 1,  # Inbound
 }
 
 # Outbound
 OUTBOUND = {
-    "api_url": _read_env("SPX_API_WFM_DASHBOARD", "/api/wfm/admin/dashboard/list"),
+    "api_url": _read_env("SPX_API_WFM_DASHBOARD"),
     "scan_type": 2,  # Outbound
+}
+
+# Workstation Assignment
+WORKSTATION_ASSIGNMENT = {
+    "api_url": _read_env("SPX_API_WORKSTATION_ASSIGNMENT_HISTORY"),
+    "page_size": 200,
 }
 
 # SPX Duplicados
 SPX_DUPLICADOS = {
-    "api_url": _read_env("SPX_API_TRACKING_INFO", "/api/fleet_order/order/detail/tracking_info"),
+    "api_url": _read_env("SPX_API_TRACKING_INFO"),
     "delay_between_requests": 0.7,   # segundos entre requisições (rate limit)
     "max_retries": 3,                # tentativas por shipment_id
     "input_sheet_tab": "'SPX DUPLICADO'!A:A",
@@ -111,7 +118,7 @@ SPX_DUPLICADOS = {
 ONLINE_SOC_TRACKING = {
     "spreadsheet_id": _read_env("ONLINE_SOC_SPREADSHEET_ID"),
     "base_status_spreadsheet_id": _read_env("ONLINE_SOC_BASE_STATUS_SPREADSHEET_ID"),
-    "api_url": _read_env("SPX_API_TRACKING_INFO", "/api/fleet_order/order/detail/tracking_info"),
+    "api_url": _read_env("SPX_API_TRACKING_INFO"),
     "max_workers": 8,
     "batch_size": 500,
     "delay_between_requests": 0,
@@ -123,7 +130,7 @@ ONLINE_SOC_TRACKING = {
 
 # Status dos Duplicados
 STATUS_DUPLICADOS = {
-    "api_url": _read_env("SPX_API_TRACKING_LIST_SEARCH", "/api/fleet_order/order/tracking_list/search"),
+    "api_url": _read_env("SPX_API_TRACKING_LIST_SEARCH"),
     "page_size": 50,
     # número de IDs a consultar em cada lote quando usado por outros módulos
     # (por exemplo, spx_duplicados). A API admite até ~5000, mas valores

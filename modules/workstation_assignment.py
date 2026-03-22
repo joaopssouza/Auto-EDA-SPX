@@ -15,14 +15,14 @@ from typing import Dict, List, Set, Tuple
 
 from rich.console import Console
 
-from core.config import BRT, SPREADSHEET_ID
+from core.config import BRT, SPREADSHEET_ID, WORKSTATION_ASSIGNMENT
 from core.session import get_session
 from core.sheets import read_sheet, update_sheet_batch
 
 console = Console()
 
-API_URL = "/api/wfm/admin/workstation/assignment/history/list"
-PAGE_SIZE = 200
+API_URL = WORKSTATION_ASSIGNMENT["api_url"]
+PAGE_SIZE = WORKSTATION_ASSIGNMENT["page_size"]
 OPS_ID_COL_INDEX = 1  # Coluna B (0-based)
 HEADER_ROW = 1
 BASE_WORKSTATION_SHEET = "BASE WORKSTATION"
