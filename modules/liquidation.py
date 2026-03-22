@@ -225,6 +225,8 @@ def _fetch_page_http(
     """
     Tenta buscar página via HTTP direto com sessão autenticada.
     Retorna (eo_list_processada, total_esperado) ou None se falhar.
+    
+    NÃO dispara auto-login em caso de erro 401; deixa para o fallback Selenium.
     """
     try:
         api_path = LIQUIDATION["api_url"]
@@ -273,8 +275,12 @@ def _fetch_page_http(
         filtered = [_extract_fields(item) for item in eo_list]
         return filtered, total_expected
     
+    except SessionExpiredError:
+        # Não tenta auto-login aqui; deixa para fallback Selenium
+        console.print(f"[dim]  Página {page}: sessão expirada (HTTP direto), usando fallback[/dim]")
+        return None
     except Exception as e:
-        console.print(f"[dim]  Página {page}: falha HTTP direto ({e})[/dim]")
+        console.print(f"[dim]  Página {page}: falha HTTP direto ({type(e).__name__})[/dim]")
         return None
 
 
@@ -600,6 +606,26 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
 
     try:
         session = get_session()  # Verifica a sessão local
+        console.print(f"[dim]  Validando sessão antes de extrair...[/dim]")
+        
+        # Validar sesão com uma chamada simples (sem disparar auto-login)
+        try:
+            # Tenta uma chamada leve para validar sessão
+            test_params = {
+                "reason_id": LIQUIDATION["reason_id"],
+                "pageno": 1,
+                "count": 1,
+            }
+            test_result = session.get(LIQUIDATION["api_url"], params=test_params)
+            
+            if isinstance(test_result, dict) and test_result.get("retcode") == 0:
+                console.print(f"[green]✅ Sessão validada e funcional[/green]")
+            else:
+                console.print(f"[yellow]⚠️ Sessão retornou retcode inválido, continuando com browser fallback[/yellow]")
+        except SessionExpiredError:
+            console.print(f"[yellow]⚠️ Sessão expirada durante validação[/yellow]")
+        except Exception as e:
+            console.print(f"[dim]  Validação não-crítica falhou: {e}[/dim]")
         
         # Tenta injetar cookies do Google para evitar perda de sessão
         from core.google_oauth import inject_google_cookies
