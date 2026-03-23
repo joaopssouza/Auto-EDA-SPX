@@ -2,7 +2,7 @@
 
 Solução modular de **Automação e Engenharia de Dados** voltada para operações SPX. O projeto foca na extração automatizada, tratamento e sincronização de dados operacionais diretamente com o Google Sheets, garantindo integridade e disponibilidade das informações.
 
-[English version: README.en.md](https://www.google.com/search?q=README.en.md)
+[English version: README.en.md](README.en.md)
 
 ## 🚀 Visão Geral e Arquitetura
 
