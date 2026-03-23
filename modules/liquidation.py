@@ -266,6 +266,81 @@ def _find_max_resolve_datetime(data: list[dict]) -> Optional[datetime]:
     return max_dt
 
 
+def _parse_resolve_datetime(item: dict) -> Optional[datetime]:
+    """Converte resolve_data/resolve_hora em datetime BRT para ordenação."""
+    data_str = str(item.get("resolve_data", "")).strip()
+    hora_str = str(item.get("resolve_hora", "")).strip()
+    if not data_str or not hora_str:
+        return None
+    try:
+        return datetime.strptime(f"{data_str} {hora_str}", "%d/%m/%Y %H:%M:%S").replace(tzinfo=BRT)
+    except ValueError:
+        return None
+
+
+def _load_existing_liquidation_rows() -> list[dict]:
+    """Carrega linhas atuais da BASE Liquidation (sem cabeçalho)."""
+    from core.sheets import read_sheet
+    from core.config import SPREADSHEET_ID
+
+    rows = read_sheet(SPREADSHEET_ID, "'BASE Liquidation'!A:E")
+    if not rows or len(rows) <= 1:
+        return []
+
+    parsed: list[dict] = []
+    for i, row in enumerate(rows):
+        if i == 0:
+            continue
+        parsed_row = {
+            "shipment_id": str(row[0]).strip() if len(row) > 0 and row[0] else "",
+            "order_status": str(row[1]).strip() if len(row) > 1 and row[1] else "",
+            "resolve_data": str(row[2]).strip() if len(row) > 2 and row[2] else "",
+            "resolve_hora": str(row[3]).strip() if len(row) > 3 and row[3] else "",
+            "related_order_id": str(row[4]).strip() if len(row) > 4 and row[4] else "",
+        }
+
+        # Ignora linhas completamente vazias para não poluir a base.
+        if not any(parsed_row.values()):
+            continue
+
+        parsed.append(parsed_row)
+    return parsed
+
+
+def _sort_liquidation_rows_desc(data: list[dict]) -> list[dict]:
+    """Ordena por resolve_data/resolve_hora decrescente (mais recente primeiro)."""
+
+    def _key(item: dict) -> tuple[bool, datetime]:
+        dt = _parse_resolve_datetime(item)
+        return (dt is not None, dt or datetime.min.replace(tzinfo=BRT))
+
+    return sorted(data, key=_key, reverse=True)
+
+
+def _cleanup_blank_rows_if_needed() -> int:
+    """Remove linhas totalmente vazias da BASE Liquidation e reaplica ordenação.
+
+    Retorna quantidade de linhas vazias removidas.
+    """
+    from core.sheets import read_sheet
+    from core.config import SPREADSHEET_ID
+
+    rows = read_sheet(SPREADSHEET_ID, "'BASE Liquidation'!A:E")
+    if not rows or len(rows) <= 1:
+        return 0
+
+    total_data_rows = len(rows) - 1
+    compact_rows = _load_existing_liquidation_rows()
+    removed = total_data_rows - len(compact_rows)
+
+    if removed <= 0:
+        return 0
+
+    sorted_compact = _sort_liquidation_rows_desc(compact_rows)
+    core_save_data(sorted_compact, MODULE_NAME, append=False)
+    return removed
+
+
 def _refresh_status_for_codes(session, status_codes_to_refresh: list[int]) -> int:
     """Re-verifica o status de registros cujo order_status atual está em status_codes_to_refresh.
 
@@ -288,7 +363,7 @@ def _refresh_status_for_codes(session, status_codes_to_refresh: list[int]) -> in
     status_map = _load_status_map()
 
     # 3. Identificar shipment_ids que precisam refresh (coluna A)
-    ids_to_refresh: dict[str, int] = {}  # {shipment_id: row_number}
+    ids_to_refresh: dict[str, dict] = {}  # {shipment_id: {row_number, status_text}}
     for i, row in enumerate(rows):
         if i == 0:  # header
             continue
@@ -302,7 +377,7 @@ def _refresh_status_for_codes(session, status_codes_to_refresh: list[int]) -> in
                     current_code = code
                     break
             if current_code in status_codes_to_refresh:
-                ids_to_refresh[sid] = i + 1  # 1-indexed row no Sheets
+                ids_to_refresh[sid] = {"row": i + 1, "old": status_text}
 
     if not ids_to_refresh:
         console.print("[yellow]⚠️ Não há registros para refrescar.[/yellow]")
@@ -312,11 +387,16 @@ def _refresh_status_for_codes(session, status_codes_to_refresh: list[int]) -> in
     console.print(f"[cyan]  Buscando status de {len(ids_to_refresh)} registros...[/cyan]")
     new_status_codes = _fetch_order_status_batch(session, list(ids_to_refresh.keys()))
 
-    # 5. Traduzir códigos em nomes
+    # 5. Traduzir códigos em nomes e exibir log detalhado
     updates: list[dict] = []
-    for sid, row_num in ids_to_refresh.items():
+    changed: list[str] = []
+    for sid, info in ids_to_refresh.items():
+        row_num = info["row"]
+        old_status = info["old"]
         new_code = new_status_codes.get(sid, "")
         new_name = status_map.get(int(new_code), new_code) if new_code and new_code.isdigit() else new_code
+        if old_status != new_name:
+            changed.append(f"  {sid}: '{old_status}' → '{new_name}'")
         updates.append({
             "range": f"'BASE Liquidation'!B{row_num}",  # coluna B é order_status
             "values": [[new_name]],
@@ -326,6 +406,10 @@ def _refresh_status_for_codes(session, status_codes_to_refresh: list[int]) -> in
     if updates:
         batch_update_values(SPREADSHEET_ID, updates)
         console.print(f"[green]✅ {len(updates)} status atualizados[/green]")
+        if changed:
+            console.print("[cyan]Modificados:")
+            for line in changed:
+                console.print(line)
 
     return len(updates)
 
@@ -389,8 +473,12 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
     end_date = datetime.now(BRT)
 
     if last_dt:
-        start_date = last_dt
-        console.print(f"[cyan]Modo incremental: buscando a partir de {start_date.strftime('%d/%m/%Y %H:%M:%S')}[/cyan]")
+        # Evita reprocessar o último item já salvo quando a API usa range inclusivo.
+        start_date = last_dt + timedelta(seconds=1)
+        console.print(
+            f"[cyan]Modo incremental: buscando após {last_dt.strftime('%d/%m/%Y %H:%M:%S')} "
+            f"(início efetivo {start_date.strftime('%d/%m/%Y %H:%M:%S')})[/cyan]"
+        )
     else:
         start_date = (end_date - timedelta(days=days_ago)).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -454,6 +542,11 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
         )
 
     if not has_new_data:
+        removed_blank_rows = _cleanup_blank_rows_if_needed()
+        if removed_blank_rows > 0:
+            console.print(
+                f"[green]✅ Limpeza automática: {removed_blank_rows} linhas vazias removidas da BASE Liquidation.[/green]"
+            )
         if not all_data:
             console.print("[yellow]⚠️ API não retornou dados para o período solicitado.[/yellow]")
         elif last_dt:
@@ -498,8 +591,16 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
     if not has_new_data:
         return None, None, 0
 
-    # Salvar: append se já havia dados, overwrite na primeira vez
-    return core_save_data(all_data, MODULE_NAME, append=not is_first_run)
+    existing_rows = _load_existing_liquidation_rows()
+    combined_data = existing_rows + all_data
+    sorted_data = _sort_liquidation_rows_desc(combined_data)
+
+    console.print(
+        f"[cyan]Organizando BASE Liquidation por data/hora (mais recente primeiro): {len(sorted_data)} linhas[/cyan]"
+    )
+
+    # Salva sobrescrevendo para manter ordenação global da aba.
+    return core_save_data(sorted_data, MODULE_NAME, append=False)
 
 
 if __name__ == "__main__":

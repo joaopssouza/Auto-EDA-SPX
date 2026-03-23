@@ -34,7 +34,71 @@ OUTPUT_HEADERS = [
     "SPXBR",
     "Status Code",
     "Tag",
+    "Latest SOC Station",             
+    "SOC Received (8/58) Timestamp",  # Atualizado
+    "SOC Received (8/58) Status",     # Atualizado
+    "SOC Received Tags",              
+    "Pack / EHA (9/59/574) Timestamp",# Atualizado
+    "Pack / EHA Status",              # Atualizado
 ]
+
+# Etapa 2: Função para extrair status 8, 9, 574
+def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
+    tracking_list = data.get("tracking_list", [])
+    if not isinstance(tracking_list, list):
+        return {}
+
+    all_events = []
+    for tracking in tracking_list:
+        if not isinstance(tracking, dict):
+            continue
+        all_events.append(tracking)
+        children = tracking.get("children", [])
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    all_events.append(child)
+
+    # Ordena cronologicamente
+    all_events.sort(key=lambda x: _to_int(x.get("timestamp")) or 0)
+
+    latest_8 = None
+    latest_pack_eha = None
+
+    # Busca reversa para pegar o último evento relevante
+    for event in reversed(all_events):
+        status = str(event.get("status"))
+        # Procura por Packing (9), Return Packing (59) ou EHA (574)
+        if not latest_8 and status in ("9", "59", "574"):
+            if not latest_pack_eha:
+                latest_pack_eha = event
+        # Procura por SOC Received (8) ou Return SOC Received (58)
+        elif status in ("8", "58"):
+            latest_8 = event
+            break
+
+    result = {
+        "station_name": "-",
+        "status_8_ts": "-",
+        "status_8_msg": "-",
+        "tags": "-",
+        "pack_eha_ts": "NÃO FOI PROCESSADO",
+        "pack_eha_msg": "NÃO FOI PROCESSADO"
+    }
+
+    if latest_8:
+        result["station_name"] = _to_str(latest_8.get("station_name"))
+        result["status_8_ts"] = _format_ts(latest_8.get("timestamp"))
+        result["status_8_msg"] = _to_str(latest_8.get("status"))
+        result["tags"] = _extract_tag_value(latest_8)
+
+    if latest_pack_eha:
+        result["pack_eha_ts"] = _format_ts(latest_pack_eha.get("timestamp"))
+        result["pack_eha_msg"] = _to_str(latest_pack_eha.get("status"))
+        if not latest_8:
+            result["station_name"] = _to_str(latest_pack_eha.get("station_name"))
+
+    return result
 
 
 def _to_str(value: Any) -> str:
@@ -256,6 +320,12 @@ def _build_rows_for_order(
     tag_value = _extract_soc_received_tag(data, event)
     spx_list = _extract_spx_list(data)
 
+    soc_info = _extract_latest_soc_status(data)
+
+    # Traduz status para descrição usando BASE STATUS
+    status_8_desc = status_map.get(soc_info["status_8_msg"], soc_info["status_8_msg"])
+    pack_eha_desc = status_map.get(soc_info["pack_eha_msg"], soc_info["pack_eha_msg"])
+
     rows: list[list[str]] = []
     for spx in spx_list:
         rows.append([
@@ -266,6 +336,12 @@ def _build_rows_for_order(
             spx,
             status_code,
             tag_value,
+            soc_info["station_name"],
+            soc_info["status_8_ts"],
+            status_8_desc,
+            soc_info["tags"],
+            soc_info["pack_eha_ts"],
+            pack_eha_desc,
         ])
 
     return rows
