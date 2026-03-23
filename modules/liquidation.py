@@ -2,17 +2,13 @@
 Módulo de Extração: Liquidation (EO List - ER48)
 =================================================
 
-Extrai dados da API de Exception Handling EO List com filtro reason_id=ER48.
-Salva apenas: shipment_id, resolve_time, related_order_id.
+Extrai dados da API de Exception Order History com filtro exclusivo reason_id=ER48.
+Salva: shipment_id, order_status, resolve_data, resolve_hora, related_order_id (sempre "-").
 
-Este endpoint requer proteção anti-bot (x-sap) específica por página,
-então usamos o Selenium para executar a request diretamente no contexto
-do browser autenticado, garantindo que todos os tokens estejam válidos.
-
-Operação: GET de Liquidation.
+Filtragem em memória: apenas motivos ER48 com status=6 (Resolved).
+Deduplicação por ID de log para garantir múltiplas liquidações do mesmo shipment.
 """
 
-import json
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,7 +17,7 @@ from typing import Optional
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from core.config import BRT, LIQUIDATION, MAX_PAGES, SPX_BASE_URL, STATUS_DUPLICADOS
+from core.config import BRT, LIQUIDATION, MAX_PAGES, STATUS_DUPLICADOS
 from core.save import save_data as core_save_data
 from core.session import SessionExpiredError, get_session
 
@@ -124,315 +120,134 @@ def _ensure_liquidation_header() -> None:
         )
 
 
-def _extract_fields(eo_item: dict) -> dict:
-    """Extrai apenas os campos relevantes de um registro eo_list."""
-    resolve_ts = eo_item.get("resolve_time", 0)
-
-    # Converte Unix timestamp para data e hora em BRT
-    if resolve_ts:
-        dt_brt = datetime.fromtimestamp(resolve_ts, tz=BRT)
+def _extract_fields(item: dict) -> Optional[dict]:
+    """
+    Extrai campos relevantes de um registro da API order/history.
+    
+    Filtragem: apenas ER48 + status=6 (Resolved).
+    operator_time é o timestamp UNIX da resolução.
+    
+    Retorna None se não passar no filtro.
+    """
+    # Extrai motivo e status
+    reason = item.get("reason", {})
+    reason_id = str(reason.get("reason_id", ""))
+    status = item.get("exception_order_status")
+    
+    # Filtro estrito
+    if reason_id != LIQUIDATION["reason_id"] or status != 6:
+        return None
+    
+    # Converte operator_time (UNIX timestamp) para data e hora BRT
+    operator_time = item.get("operator_time", 0)
+    if operator_time:
+        dt_brt = datetime.fromtimestamp(operator_time, tz=BRT)
         resolve_data = dt_brt.strftime("%d/%m/%Y")
         resolve_hora = dt_brt.strftime("%H:%M:%S")
     else:
         resolve_data = ""
         resolve_hora = ""
-
+    
     return {
-        "shipment_id": eo_item.get("shipment_id", ""),
-        "order_status": "",  # preenchido posteriormente na coluna B
+        "shipment_id": item.get("shipment_id", ""),
+        "order_status": "",  # Preenchido depois
         "resolve_data": resolve_data,
         "resolve_hora": resolve_hora,
-        "related_order_id": eo_item.get("related_order_id", ""),
+        "related_order_id": "-",  # Sempre "-" conforme spec
     }
-
-
-def _create_browser_driver(headless: bool = False):
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
-    from webdriver_manager.chrome import ChromeDriverManager
-    from pathlib import Path
-    
-    options = Options()
-
-    # Opções para evitar detecção
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-
-    # Configuração correta de logs de performance
-    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-
-    if False:
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-
-    options.add_argument("--window-size=1920,1080")
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-
-    return driver
-
-
-def _fetch_via_browser(driver, url: str) -> dict:
-    """
-    Executa fetch() no contexto do browser autenticado.
-    Isso garante que todos os cookies e tokens anti-bot (x-sap) estejam presentes.
-    """
-    js_code = f"""
-    const response = await fetch("{url}", {{
-        method: 'GET',
-        credentials: 'include',
-        headers: {{
-            'accept': 'application/json, text/plain, */*',
-        }}
-    }});
-    const data = await response.json();
-    return JSON.stringify(data);
-    """
-    # Selenium execute_async_script para aguardar a Promise
-    async_js = f"""
-    var callback = arguments[arguments.length - 1];
-    fetch("{url}", {{
-        method: 'GET',
-        credentials: 'include',
-        headers: {{
-            'accept': 'application/json, text/plain, */*',
-        }}
-    }})
-    .then(r => r.json())
-    .then(data => callback(JSON.stringify(data)))
-    .catch(err => callback(JSON.stringify({{"error": err.message}})));
-    """
-    result_str = driver.execute_async_script(async_js)
-    return json.loads(result_str)
-
-
-def _fetch_page_http(
-    session,
-    start_ts: int,
-    end_ts: int,
-    page: int,
-    count_per_page: int,
-) -> Optional[tuple[list[dict], int]]:
-    """
-    Tenta buscar página via HTTP direto com sessão autenticada.
-    Retorna (eo_list_processada, total_esperado) ou None se falhar.
-    
-    NÃO dispara auto-login em caso de erro 401; deixa para o fallback Selenium.
-    """
-    try:
-        api_path = LIQUIDATION["api_url"]
-        reason_id = LIQUIDATION["reason_id"]
-        
-        params = {
-            "reason_id": reason_id,
-            "resolve_time": f"{start_ts},{end_ts}",
-            "start_resolve_time": start_ts,
-            "end_resolve_time": end_ts,
-            "pageno": page,
-            "count": count_per_page,
-        }
-        
-        data = session.get(api_path, params=params)
-        
-        if not isinstance(data, dict):
-            console.print(f"[yellow]⚠️ Página {page}: resposta inesperada (HTTP direto)[/yellow]")
-            return None
-        
-        # Verifica erros de autenticação
-        api_error = data.get("error", 0)
-        is_login = data.get("is_login", True)
-        
-        if api_error != 0 or not is_login:
-            console.print(
-                f"[yellow]⚠️ Página {page}: error={api_error}, is_login={is_login} (HTTP direto)[/yellow]"
-            )
-            return None
-        
-        retcode = data.get("retcode", 0)
-        if retcode != 0:
-            console.print(
-                f"[yellow]⚠️ Página {page}: retcode={retcode} (HTTP direto)[/yellow]"
-            )
-            return None
-        
-        data_wrapper = data.get("data", {})
-        eo_list = data_wrapper.get("eo_list", [])
-        total_expected = data_wrapper.get("total", 0)
-        
-        if not eo_list:
-            return [], total_expected
-        
-        # Extrai apenas os campos necessários
-        filtered = [_extract_fields(item) for item in eo_list]
-        return filtered, total_expected
-    
-    except SessionExpiredError:
-        # Não tenta auto-login aqui; deixa para fallback Selenium
-        console.print(f"[dim]  Página {page}: sessão expirada (HTTP direto), usando fallback[/dim]")
-        return None
-    except Exception as e:
-        console.print(f"[dim]  Página {page}: falha HTTP direto ({type(e).__name__})[/dim]")
-        return None
-
-
-def _fetch_page_selenium(
-    driver,
-    start_ts: int,
-    end_ts: int,
-    page: int,
-    count_per_page: int,
-) -> Optional[tuple[list[dict], int]]:
-    """
-    Tenta buscar página via Selenium (fallback de HTTP direto).
-    Retorna (eo_list_processada, total_esperado) ou None se falhar.
-    """
-    try:
-        base_url = SPX_BASE_URL
-        api_path = LIQUIDATION["api_url"]
-        reason_id = LIQUIDATION["reason_id"]
-        
-        url = (
-            f"{base_url}{api_path}"
-            f"?reason_id={reason_id}"
-            f"&resolve_time={start_ts},{end_ts}"
-            f"&start_resolve_time={start_ts}"
-            f"&end_resolve_time={end_ts}"
-            f"&pageno={page}"
-            f"&count={count_per_page}"
-        )
-        
-        data = _fetch_via_browser(driver, url)
-        
-        if not isinstance(data, dict):
-            console.print(f"[red]Página {page}: resposta inesperada (Selenium)[/red]")
-            return None
-        
-        # Verifica erros de autenticação
-        api_error = data.get("error", 0)
-        is_login = data.get("is_login", True)
-        
-        if api_error != 0 or not is_login:
-            console.print(
-                f"[red]❌ Página {page}: error={api_error}, is_login={is_login} (Selenium)[/red]"
-            )
-            return None
-        
-        retcode = data.get("retcode", 0)
-        if retcode != 0:
-            console.print(
-                f"[red]Página {page}: retcode={retcode} (Selenium)[/red]"
-            )
-            return None
-        
-        data_wrapper = data.get("data", {})
-        eo_list = data_wrapper.get("eo_list", [])
-        total_expected = data_wrapper.get("total", 0)
-        
-        if not eo_list:
-            return [], total_expected
-        
-        # Extrai apenas os campos necessários
-        filtered = [_extract_fields(item) for item in eo_list]
-        return filtered, total_expected
-    
-    except Exception as e:
-        console.print(f"[red]❌ Página {page}: falha Selenium ({e})[/red]")
-        return None
 
 
 def fetch_liquidation_orders(
     session,
-    driver,
     start_date: datetime,
     end_date: datetime,
     count_per_page: int = None,
 ) -> list[dict]:
     """
-    Busca dados de EO List (ER48) com fallback HTTP->Selenium.
-    Tenta HTTP direto primeiro; se falhar, usa Selenium.
+    Busca dados de Exception Order History com filtro ER48 + status=6.
+    
+    Deduplicação: usa item.get("id") como chave para evitar duplicatas
+    e permitir múltiplas liquidações do mesmo shipment_id.
     """
     count_per_page = count_per_page or LIQUIDATION["page_size"]
-
     start_ts, end_ts = get_time_range(start_date, end_date)
 
-    console.print(f"[cyan]Buscando Liquidation EO List (ER48)...[/cyan]")
+    console.print(f"[cyan]Buscando Liquidation (ER48)...[/cyan]")
     console.print(
         f"  Período: {datetime.fromtimestamp(start_ts, tz=BRT).strftime('%d/%m/%Y %H:%M')} "
         f"até {datetime.fromtimestamp(end_ts, tz=BRT).strftime('%d/%m/%Y %H:%M')}"
     )
 
-    all_data: list[dict] = []
+    all_data: dict[str, dict] = {}  # Deduplicação por log ID
     page = 1
-    use_selenium = False  # Iniciar com HTTP; trocar para Selenium se necessário
+    search_after = None
+    total_expected = 0
 
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Extraindo dados...", total=None)
+        task = progress.add_task("Extraindo...", total=None)
 
         while page <= MAX_PAGES:
+            params = {
+                "operator_time": f"{start_ts},{end_ts}",
+                "pageno": page,
+                "count": count_per_page,
+            }
+
+            if search_after:
+                params["search_after"] = search_after
+
             try:
-                # Primeira tentativa: HTTP direto
-                if not use_selenium:
-                    result = _fetch_page_http(session, start_ts, end_ts, page, count_per_page)
-                    
-                    if result is not None:
-                        eo_list, total_expected = result
-                        console.print(f"[green]✅ Página {page}: HTTP direto OK[/green]")
-                        all_data.extend(eo_list)
-                        progress.update(
-                            task,
-                            description=f"Página {page}: {len(all_data)}/{total_expected}",
-                        )
-                        if len(all_data) >= total_expected:
-                            break
-                        page += 1
-                        time.sleep(0.5)
-                        continue
-                    else:
-                        # Falhou HTTP, ativar Selenium e tentar novamente
-                        console.print(f"[yellow]⚠️ HTTP direto falhou. Ativando Selenium...[/yellow]")
-                        use_selenium = True
-                
-                # Segunda tentativa ou Selenium direto
-                result = _fetch_page_selenium(driver, start_ts, end_ts, page, count_per_page)
-                
-                if result is not None:
-                    eo_list, total_expected = result
-                    console.print(f"[green]✅ Página {page}: Selenium OK[/green]")
-                    all_data.extend(eo_list)
-                    progress.update(
-                        task,
-                        description=f"Página {page}: {len(all_data)}/{total_expected}",
-                    )
-                    if len(all_data) >= total_expected:
-                        break
-                    page += 1
-                    time.sleep(0.5)
-                else:
-                    # Selenium também falhou
-                    console.print(f"[red]❌ Falha em ambas as tentativas (HTTP e Selenium)[/red]")
+                data = session.get(LIQUIDATION["api_url"], params=params)
+
+                if not isinstance(data, dict):
+                    console.print(f"[red]Resposta inesperada: {type(data)}[/red]")
                     break
+
+                retcode = data.get("retcode", -1)
+                if retcode != 0:
+                    console.print(f"[red]Erro API: {data.get('message', 'desconhecido')}[/red]")
+                    break
+
+                data_wrapper = data.get("data", {})
+                items = data_wrapper.get("list", [])
+                total_expected = data_wrapper.get("total", 0)
+                search_after = data_wrapper.get("search_after")
+
+                if not items:
+                    break
+
+                # Filtrar e desduplicar
+                for item in items:
+                    extracted = _extract_fields(item)
+                    if extracted:  # Apenas ER48 + status 6
+                        log_id = str(item.get("id", ""))
+                        if log_id:
+                            all_data[log_id] = extracted  # Dedup por ID
+
+                progress.update(
+                    task,
+                    description=f"Página {page}: {len(all_data)} itens únicos",
+                )
+
+                if len(all_data) >= total_expected or not search_after:
+                    break
+
+                page += 1
+                time.sleep(0.5)
 
             except SessionExpiredError:
                 raise
             except Exception as e:
-                console.print(f"[red]❌ Erro crítico na página {page}: {e}[/red]")
+                console.print(f"[red]❌ Erro na página {page}: {e}[/red]")
                 break
 
-    console.print(f"[green]  → {len(all_data)} registros extraídos[/green]")
-    return all_data
+    result = list(all_data.values())
+    console.print(f"[green]  → {len(result)} registros extraídos (desduplicados)[/green]")
+    return result
 
 
 def _find_max_resolve_datetime(data: list[dict]) -> Optional[datetime]:
@@ -560,21 +375,19 @@ def _get_last_resolve_datetime_from_sheet() -> Optional[datetime]:
 
 def run(days_ago: int = None) -> tuple[Path, Path, int]:
     """
-    Executa extração completa de Liquidation (EO List ER48).
-    Usa Selenium para contornar proteção anti-bot x-sap.
-    Divide o período em chunks de 5 dias para contornar limite de 10k.
-    Suporta processamento incremental lendo a última data do BASE Liquidation.
+    Executa extração completa de Liquidation (ER48 apenas).
+    Divide o período em chunks de 12 horas para lidar com grande volume.
+    Sem dependência de Selenium - usa HTTP direto.
     """
     console.print("[bold cyan]═══ Liquidation (EO List ER48) ═══[/bold cyan]")
     session = None
 
-    # 1. Ler último resolve_data/resolve_hora direto da planilha BASE Liquidation
+    # Ler último registro da planilha
     last_dt = _get_last_resolve_datetime_from_sheet()
 
     days_ago = days_ago or LIQUIDATION["days_ago"]
     end_date = datetime.now(BRT)
 
-    # 2. Definir start_date: se já há dados na planilha, usa o último timestamp
     if last_dt:
         start_date = last_dt
         console.print(f"[cyan]Modo incremental: buscando a partir de {start_date.strftime('%d/%m/%Y %H:%M:%S')}[/cyan]")
@@ -586,8 +399,8 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
 
     is_first_run = (last_dt is None)
 
-    # Divide em chunks de 5 dias
-    chunk_days = 5
+    # Chunking por 12 horas (conforme spec)
+    chunk_hours = 12
     all_data: list[dict] = []
     current_start = start_date
     chunk_num = 1
@@ -596,68 +409,13 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
         f"[cyan]Período total: {start_date.strftime('%d/%m/%Y %H:%M')} "
         f"até {end_date.strftime('%d/%m/%Y %H:%M')}[/cyan]"
     )
-    console.print(f"[dim]Dividindo em chunks de {chunk_days} dias...[/dim]")
-
-    # Abre browser uma vez e reutiliza para todos os chunks
-    import os
-    is_headless = os.getenv("GITHUB_ACTIONS") == "true"
-    console.print(f"[cyan]🌐 Abrindo browser para bypass anti-bot...[/cyan]")
-    driver = _create_browser_driver(headless=is_headless)
+    console.print(f"[dim]Dividindo em chunks de {chunk_hours} horas...[/dim]")
 
     try:
-        session = get_session()  # Verifica a sessão local
-        console.print(f"[dim]  Validando sessão antes de extrair...[/dim]")
-        
-        # Validar sesão com uma chamada simples (sem disparar auto-login)
-        try:
-            # Tenta uma chamada leve para validar sessão
-            test_params = {
-                "reason_id": LIQUIDATION["reason_id"],
-                "pageno": 1,
-                "count": 1,
-            }
-            test_result = session.get(LIQUIDATION["api_url"], params=test_params)
-            
-            if isinstance(test_result, dict) and test_result.get("retcode") == 0:
-                console.print(f"[green]✅ Sessão validada e funcional[/green]")
-            else:
-                console.print(f"[yellow]⚠️ Sessão retornou retcode inválido, continuando com browser fallback[/yellow]")
-        except SessionExpiredError:
-            console.print(f"[yellow]⚠️ Sessão expirada durante validação[/yellow]")
-        except Exception as e:
-            console.print(f"[dim]  Validação não-crítica falhou: {e}[/dim]")
-        
-        # Tenta injetar cookies do Google para evitar perda de sessão
-        from core.google_oauth import inject_google_cookies
-        inject_google_cookies(driver)
-
-        # Navega ao SPX para garantir contexto e injeta cookies SPX
-        driver.get(SPX_BASE_URL)
-        time.sleep(3)
-        
-        # Injeta cookies SPX restaurados da nuvem/local
-        if session.session_data and "cookies" in session.session_data:
-            for name, value in session.session_data["cookies"].items():
-                driver.add_cookie({
-                    "name": name,
-                    "value": value,
-                    "domain": ".shopee.com.br",
-                    "path": "/"
-                })
-        
-        # Recarrega a página autenticada
-        driver.get(SPX_BASE_URL)
-        time.sleep(3)
-
-        current_url = driver.current_url
-        if SPX_BASE_URL not in current_url:
-            console.print(f"[red]❌ Browser não está autenticado no SPX. URL: {current_url}[/red]")
-            raise SessionExpiredError("Browser não autenticado no SPX.")
-
-        console.print(f"[green]✅ Browser autenticado no SPX[/green]")
+        session = get_session()
 
         while current_start < end_date:
-            current_end = min(current_start + timedelta(days=chunk_days), end_date)
+            current_end = min(current_start + timedelta(hours=chunk_hours), end_date)
 
             console.print(
                 f"\n[bold]Chunk {chunk_num}: "
@@ -665,7 +423,7 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
                 f"{current_end.strftime('%d/%m %H:%M')}[/bold]"
             )
 
-            chunk_data = fetch_liquidation_orders(session, driver, current_start, current_end)
+            chunk_data = fetch_liquidation_orders(session, current_start, current_end)
 
             if chunk_data:
                 all_data.extend(chunk_data)
@@ -680,9 +438,6 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
     except Exception as e:
         console.print(f"[red]❌ Erro inesperado na Extração: {e}[/red]")
         raise
-    finally:
-        driver.quit()
-        console.print("[dim]Browser fechado.[/dim]")
 
     console.print(f"\n[bold green]✅ TOTAL GERAL: {len(all_data)} registros![/bold green]")
     _ensure_liquidation_header()
@@ -700,15 +455,15 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
 
     if not has_new_data:
         if not all_data:
-            console.print("[yellow]⚠️ API não retornou novos SPX para o período solicitado.[/yellow]")
+            console.print("[yellow]⚠️ API não retornou dados para o período solicitado.[/yellow]")
         elif last_dt:
             console.print(
-                f"[yellow]⚠️ Nenhum SPX novo desde {last_dt.strftime('%d/%m/%Y %H:%M:%S')}.[/yellow]"
+                f"[yellow]⚠️ Nenhum novo ER48 desde {last_dt.strftime('%d/%m/%Y %H:%M:%S')}.[/yellow]"
             )
         else:
             console.print("[yellow]⚠️ Sem dados válidos para comparação de timestamps.[/yellow]")
 
-    # 3. Buscar order_status para todos os shipment_ids (somente quando há novidades)
+    # Buscar order_status para todos os shipment_ids (somente quando há novidades)
     if has_new_data and all_data:
         console.print("[cyan]Buscando order_status dos shipment_ids...[/cyan]")
         if session is None:
@@ -732,7 +487,7 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
             f"[green]  → {sum(1 for item in all_data if item.get('order_status'))} com status obtido[/green]"
         )
 
-    # 4. Fazer refresh dos status que aparecem com códigos 58, 8, 203
+    # Refrescar status de registros anteriores
     console.print("\n[cyan]Refrescando status anteriores...[/cyan]")
     if session is None:
         session = get_session()
@@ -743,7 +498,7 @@ def run(days_ago: int = None) -> tuple[Path, Path, int]:
     if not has_new_data:
         return None, None, 0
 
-    # 5. Salvar: append se já havia dados na planilha, overwrite na primeira vez
+    # Salvar: append se já havia dados, overwrite na primeira vez
     return core_save_data(all_data, MODULE_NAME, append=not is_first_run)
 
 

@@ -88,10 +88,10 @@ EXCEPTION_ORDERS = {
 
 # Liquidation (EO List - ER48)
 LIQUIDATION = {
-    "api_url": _read_env("SPX_API_EXCEPTION_HANDLING_EO_LIST"),
+    "api_url": _read_env("SPX_API_EXCEPTION_ORDER_HISTORY"),
     "reason_id": "ER48",
     "days_ago": 60,
-    "page_size": 24,
+    "page_size": 1000,
 }
 
 # Inbound
