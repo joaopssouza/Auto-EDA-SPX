@@ -35,14 +35,14 @@ jobs:
       CHROME_USER_DATA: /tmp/chrome
       CHROME_PROFILE: Default
       PYTHONUNBUFFERED: '1'
-        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
     steps:
       - name: Checkout do repositório
-          uses: actions/checkout@v4.2.0
+        uses: actions/checkout@v4.2.0
 
       - name: Setup Python
-          uses: actions/setup-python@v5.2.0
+        uses: actions/setup-python@v5.2.0
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -110,11 +110,11 @@ jobs:
           echo "🚀 Iniciando extração de Outbound..."
           python main.py --outbound
 
-          echo "🚀 Iniciando extração de Recebimento SOC..."
-          python main.py --recebimento
+          #echo "🚀 Iniciando extração de Recebimento SOC..."
+          #python main.py --recebimento
 
           echo "⏳ Cooldown de 10s antes do Workstation..."
-          sleep 03
+          sleep 3
 
           echo "🚀 Iniciando extração de Escalation Ticket..."
           python main.py --escalation
