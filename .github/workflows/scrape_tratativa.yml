@@ -110,8 +110,8 @@ jobs:
           echo "🚀 Iniciando extração de Outbound..."
           python main.py --outbound
 
-          #echo "🚀 Iniciando extração de Recebimento SOC..."
-          #python main.py --recebimento
+          echo "🚀 Iniciando extração de Recebimento SOC..."
+          python main.py --recebimento
 
           echo "⏳ Cooldown de 10s antes do Workstation..."
           sleep 3
