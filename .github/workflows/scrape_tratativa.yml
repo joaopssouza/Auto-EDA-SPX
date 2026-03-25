@@ -119,15 +119,8 @@ jobs:
           echo "🚀 Iniciando extração de Escalation Ticket..."
           python main.py --escalation
 
-          # Executa o Pipeline SPX a cada 2 horas (horas pares)
-          # A verificação "-lt 30" assegura que rode apenas no gatilho do início da hora,
-          # e não no gatilho dos 30 minutos (já que o cron roda a cada 30 min).
-          if [ $((10#$BRT_HOUR % 2)) -eq 0 ] && [ $((10#$BRT_MIN)) -lt 30 ]; then
-            echo "🚀 Iniciando Pipeline SPX (Liquidation + Duplicados + Status)..."
-            python main.py --pipeline-spx
-          else
-            echo "⏸️ Ignorando Pipeline SPX (Agendado para horas pares, HH:00)."
-          fi
+          echo "🚀 Iniciando Pipeline SPX (Liquidation + Duplicados + Status)..."
+          python main.py --pipeline-spx
 
       - name: Limpar arquivos temporários
         if: always()
