@@ -28,16 +28,16 @@ MODULE_NAME = "online_soc_tracking"
 
 OUTPUT_HEADERS = [
     "Order ID",
-    "SOC Received time",
+    "HUB/SOC Received time",
     "Last Status",
     "Last Status Timestamp",
     "SPXBR",
     "Status Code",
     "Tag",
-    "Latest SOC Station",             
-    "SOC Received (8/58) Timestamp",  # Atualizado
-    "SOC Received (8/58) Status",     # Atualizado
-    "SOC Received Tags",              
+    "Latest HUB/SOC Station",             
+    "HUB/SOC Received (1/10/8/58) Timestamp",  # Atualizado
+    "HUB/SOC Received (1/10/8/58) Status",     # Atualizado
+    "HUB/SOC Received Tags",              
     "Pack / EHA (9/59/574) Timestamp",# Atualizado
     "Pack / EHA Status",              # Atualizado
 ]
@@ -62,41 +62,64 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
     # Ordena cronologicamente
     all_events.sort(key=lambda x: _to_int(x.get("timestamp")) or 0)
 
-    latest_8 = None
+    latest_8_1_10 = None
     latest_pack_eha = None
+    last_status_event = all_events[-1] if all_events else None
 
     # Busca reversa para pegar o último evento relevante
     for event in reversed(all_events):
         status = str(event.get("status"))
         # Procura por Packing (9), Return Packing (59) ou EHA (574)
-        if not latest_8 and status in ("9", "59", "574"):
+        if not latest_8_1_10 and status in ("9", "59", "574"):
             if not latest_pack_eha:
                 latest_pack_eha = event
-        # Procura por SOC Received (8) ou Return SOC Received (58)
-        elif status in ("8", "58"):
-            latest_8 = event
+        # Procura por SOC/HUB Received (1, 10, 8, 58)
+        elif status in ("1", "10", "8", "58"):
+            latest_8_1_10 = event
+            break
+
+    # Nova lógica: buscar o último station_name diferente de SoC_MG_Betim com status 1,10,8,58,9,59,574
+    latest_station_name = None
+    for event in reversed(all_events):
+        status = str(event.get("status"))
+        station = _to_str(event.get("station_name"))
+        if status in ("1", "10", "8", "58", "9", "59", "574") and station and station != "SoC_MG_Betim":
+            latest_station_name = station
             break
 
     result = {
         "station_name": "-",
-        "status_8_ts": "-",
-        "status_8_msg": "-",
+        "status_8_1_10_ts": "-",
+        "status_8_1_10_msg": "-",
         "tags": "-",
         "pack_eha_ts": "NÃO FOI PROCESSADO",
         "pack_eha_msg": "NÃO FOI PROCESSADO"
     }
 
-    if latest_8:
-        result["station_name"] = _to_str(latest_8.get("station_name"))
-        result["status_8_ts"] = _format_ts(latest_8.get("timestamp"))
-        result["status_8_msg"] = _to_str(latest_8.get("status"))
-        result["tags"] = _extract_tag_value(latest_8)
+    if latest_8_1_10:
+        result["status_8_1_10_ts"] = _format_ts(latest_8_1_10.get("timestamp"))
+        result["status_8_1_10_msg"] = _to_str(latest_8_1_10.get("status"))
+        result["tags"] = _extract_tag_value(latest_8_1_10)
 
     if latest_pack_eha:
         result["pack_eha_ts"] = _format_ts(latest_pack_eha.get("timestamp"))
         result["pack_eha_msg"] = _to_str(latest_pack_eha.get("status"))
-        if not latest_8:
-            result["station_name"] = _to_str(latest_pack_eha.get("station_name"))
+
+    # Definir o station_name conforme a nova regra
+    if latest_station_name:
+        result["station_name"] = latest_station_name
+    else:
+        # Busca o último station_name não vazio de all_events
+        last_non_empty_station = None
+        for event in reversed(all_events):
+            station = _to_str(event.get("station_name"))
+            if station:
+                last_non_empty_station = station
+                break
+        if last_non_empty_station:
+            result["station_name"] = last_non_empty_station
+        elif last_status_event:
+            result["station_name"] = _to_str(last_status_event.get("station_name"))
 
     return result
 
@@ -323,7 +346,7 @@ def _build_rows_for_order(
     soc_info = _extract_latest_soc_status(data)
 
     # Traduz status para descrição usando BASE STATUS
-    status_8_desc = status_map.get(soc_info["status_8_msg"], soc_info["status_8_msg"])
+    status_8_1_10_desc = status_map.get(soc_info["status_8_1_10_msg"], soc_info["status_8_1_10_msg"])
     pack_eha_desc = status_map.get(soc_info["pack_eha_msg"], soc_info["pack_eha_msg"])
 
     rows: list[list[str]] = []
@@ -337,8 +360,8 @@ def _build_rows_for_order(
             status_code,
             tag_value,
             soc_info["station_name"],
-            soc_info["status_8_ts"],
-            status_8_desc,
+            soc_info["status_8_1_10_ts"],
+            status_8_1_10_desc,
             soc_info["tags"],
             soc_info["pack_eha_ts"],
             pack_eha_desc,
