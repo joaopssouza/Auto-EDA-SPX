@@ -113,12 +113,15 @@ jobs:
           echo "🚀 Iniciando extração de Recebimento SOC..."
           python main.py --recebimento
 
-          echo "⏳ Cooldown de 10s antes do Workstation..."
+          echo "⏳ Cooldown de 10s."
           sleep 3
-
+          
           echo "🚀 Iniciando extração de Escalation Ticket..."
           python main.py --escalation
 
+          echo "🚀 Iniciando verificação dos online-soc..."
+          python main.py --online-soc
+          
           echo "🚀 Iniciando Pipeline SPX (Liquidation + Duplicados + Status)..."
           python main.py --pipeline-spx
 
