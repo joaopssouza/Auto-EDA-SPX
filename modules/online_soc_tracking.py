@@ -1,3 +1,139 @@
+from __future__ import annotations
+
+def _read_order_ids_from_query_base_soc() -> list[str]:
+    """Lê Order IDs da coluna BJ2:BJ da aba 'query BASE SOC'."""
+    # BJ = coluna 62 (A=1, ..., Z=26, AA=27, ..., BJ=62)
+    # O método read_sheet pode retornar linhas de comprimentos variados;
+    # acessamos a célula 61 (0-based) com segurança.
+    rows = read_sheet(
+        ONLINE_SOC_TRACKING["spreadsheet_id"],
+        "query BASE SOC",
+    )
+
+    if not rows:
+        return []
+
+    order_ids: list[str] = []
+    seen: set[str] = set()
+
+    for idx, row in enumerate(rows):
+        if not isinstance(row, list):
+            continue
+
+        # pega o valor em BJ (índice 61) de forma segura
+        order_id = _to_str(row[61]) if len(row) > 61 else ""
+
+        # pula cabeçalho caso exista
+        if idx == 0 and order_id.lower() in {"order id", "order_id", "shipment_id"}:
+            continue
+
+        if not order_id:
+            continue
+
+        if order_id in seen:
+            continue
+
+        seen.add(order_id)
+        order_ids.append(order_id)
+
+    return order_ids
+
+def run_query_base_soc() -> tuple[Path | None, Path | None, int]:
+    """Executa coleta de tracking_info para Order IDs da query BASE SOC e salva snapshot em raw_tracking_info_RF."""
+    console.print("[bold cyan]═══ Online SOC Tracking (query BASE SOC) ═══[/bold cyan]")
+
+    order_ids = _read_order_ids_from_query_base_soc()
+    console.print(f"[blue]🔎 {len(order_ids)} Order IDs lidos da coluna BJ da aba query BASE SOC.[/blue]")
+    if order_ids:
+        sample = ", ".join(order_ids[:5])
+        console.print(f"[blue]🔎 Amostra (até 5): {sample}[/blue]")
+    else:
+        console.print("[yellow]⚠️ Nenhum Order ID encontrado na coluna BJ da aba query BASE SOC.[/yellow]")
+        return None, None, 0
+
+    status_map = _load_status_map()
+    session = get_session()
+
+    max_workers = int(ONLINE_SOC_TRACKING.get("max_workers", 8))
+    max_workers = max(1, max_workers)
+    batch_size = int(ONLINE_SOC_TRACKING.get("batch_size", 500))
+    batch_size = max(1, batch_size)
+
+# Nova função: processa coluna A2:A e salva na aba 'raw_tracking_info'
+    total_rows_written = 0
+
+    header_ok = update_sheet(
+        ONLINE_SOC_TRACKING["spreadsheet_id"],
+        "raw_tracking_info_RF",
+        [OUTPUT_HEADERS],
+        clear_first=True,
+    )
+    if not header_ok:
+        console.print("[red]❌ Falha ao preparar aba raw_tracking_info_RF.[/red]")
+        return None, None, 0
+
+    indexed_orders = list(enumerate(order_ids))
+    total_batches = (len(indexed_orders) + batch_size - 1) // batch_size
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Consultando tracking_info...", total=len(indexed_orders))
+
+        for batch_idx in range(total_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, len(indexed_orders))
+            batch_orders = indexed_orders[start:end]
+
+            indexed_rows: list[tuple[int, list[list[str]]]] = []
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_process_single_order, idx, order_id, session, status_map)
+                    for idx, order_id in batch_orders
+                ]
+
+                for future in as_completed(futures):
+                    try:
+                        indexed_rows.append(future.result())
+                    except Exception as exc:
+                        console.print(f"[red]❌ Falha no processamento paralelo: {exc}[/red]")
+                    finally:
+                        progress.update(task, advance=1)
+
+            indexed_rows.sort(key=lambda item: item[0])
+            batch_rows: list[list[str]] = []
+            for _, rows in indexed_rows:
+                for row in rows:
+                    # Salva qualquer linha com Order ID não vazio (mesmo se os outros campos estiverem vazios)
+                    if row and row[0]:
+                        batch_rows.append(row)
+
+            if batch_rows:
+                ok_append = append_sheet(
+                    ONLINE_SOC_TRACKING["spreadsheet_id"],
+                    "raw_tracking_info_RF",
+                    batch_rows,
+                )
+                if not ok_append:
+                    console.print(
+                        f"[red]❌ Falha ao salvar lote {batch_idx + 1}/{total_batches} na raw_tracking_info_RF. Execução interrompida.[/red]"
+                    )
+                    return None, None, total_rows_written
+
+                total_rows_written += len(batch_rows)
+                console.print(
+                    f"[cyan]📦 Lote {batch_idx + 1}/{total_batches} salvo: {len(batch_rows)} linhas (acumulado: {total_rows_written})[/cyan]"
+                )
+            else:
+                console.print(f"[yellow]📦 Lote {batch_idx + 1}/{total_batches} sem linhas válidas.[/yellow]")
+
+    console.print(f"[bold green]✅ Snapshot salvo em raw_tracking_info_RF: {total_rows_written} linhas[/bold green]")
+    return None, None, total_rows_written
+
 """
 Módulo: Online SOC Tracking
 ===========================
@@ -6,8 +142,6 @@ Lê Order IDs da aba Online_SOC-MG2, consulta tracking_info por shipment_id
 (equivale a tracking details), extrai o último children do último tracking_list,
 expande SPXBR quando existir mais de um e grava snapshot em raw_tracking_info.
 """
-
-from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
@@ -385,12 +519,16 @@ def _process_single_order(
 
 def run() -> tuple[Path | None, Path | None, int]:
     """Executa coleta de tracking_info e salva snapshot em raw_tracking_info."""
+    # Primeiro, processa os Order IDs da aba 'query BASE SOC' (coluna BJ -> raw_tracking_info_RF)
+    rf_path, rf_csv, rf_count = run_query_base_soc()
+
     console.print("[bold cyan]═══ Online SOC Tracking ═══[/bold cyan]")
 
     order_ids = _read_order_ids()
     if not order_ids:
         console.print("[yellow]⚠️ Nenhum Order ID encontrado na aba Online_SOC-MG2.[/yellow]")
-        return None, None, 0
+        # Retorna pelo menos o que foi salvo em RF
+        return None, None, rf_count
 
     status_map = _load_status_map()
     session = get_session()
@@ -446,7 +584,9 @@ def run() -> tuple[Path | None, Path | None, int]:
             indexed_rows.sort(key=lambda item: item[0])
             batch_rows: list[list[str]] = []
             for _, rows in indexed_rows:
-                batch_rows.extend(rows)
+                for row in rows:
+                    if row and row[0] and any(cell for cell in row[1:]):
+                        batch_rows.append(row)
 
             if batch_rows:
                 ok_append = append_sheet(
@@ -467,9 +607,12 @@ def run() -> tuple[Path | None, Path | None, int]:
             else:
                 console.print(f"[yellow]📦 Lote {batch_idx + 1}/{total_batches} sem linhas válidas.[/yellow]")
 
-    console.print(f"[bold green]✅ Snapshot salvo em raw_tracking_info: {total_rows_written} linhas[/bold green]")
-    return None, None, total_rows_written
+    total = rf_count + total_rows_written
+    console.print(f"[bold green]✅ Snapshot salvo em raw_tracking_info: {total_rows_written} linhas (RF: {rf_count}, total: {total})[/bold green]")
+    return None, None, total
 
 
 if __name__ == "__main__":
+    # Executa primeiro BJ2:BJ (raw_tracking_info_RF), depois A2:A (raw_tracking_info)
+    run_query_base_soc()
     run()
