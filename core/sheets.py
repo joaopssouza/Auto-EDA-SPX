@@ -193,20 +193,13 @@ def update_sheet(
                 range=clear_range
             ))
         
-        # Sanitiza os dados (converte dicts/lists para string)
-        sanitized_values = []
-        for row in values:
-            new_row = []
-            for cell in row:
-                if isinstance(cell, (str, int, float, bool)) or cell is None:
-                    new_row.append(cell)
-                else:
-                    new_row.append(str(cell))
-            sanitized_values.append(new_row)
+        # Sanitiza e filtra linhas completamente vazias
+        sanitized_values = _sanitize_and_filter_rows(values)
+        if not sanitized_values:
+            console.print(f"[yellow]⚠️ Nenhuma linha válida para append em {range_name}. Pulando.[/yellow]")
+            return True
 
-        body = {
-            "values": sanitized_values
-        }
+        body = {"values": sanitized_values}
         
         # Escreve os novos dados
         result = execute_with_retry(sheet.values().update(
@@ -231,7 +224,8 @@ def update_sheet(
 def append_sheet(
     spreadsheet_id: str,
     range_name: str,
-    values: List[List[Any]]
+    values: List[List[Any]],
+    num_cols: int | None = None,
 ) -> bool:
     """
     Adiciona linhas ao final de uma aba do Google Sheets.
@@ -258,20 +252,24 @@ def append_sheet(
 
         sheet = service.spreadsheets()
         
-        # Sanitiza os dados (converte dicts/lists para string)
-        sanitized_values = []
-        for row in values:
-            new_row = []
-            for cell in row:
-                if isinstance(cell, (str, int, float, bool)) or cell is None:
-                    new_row.append(cell)
-                else:
-                    new_row.append(str(cell))
-            sanitized_values.append(new_row)
+        # Sanitiza e filtra linhas vazias
+        sanitized_values = _sanitize_and_filter_rows(values)
+        if not sanitized_values:
+            console.print(f"[yellow]⚠️ Nenhuma linha válida para append em {range_name}. Pulando.[/yellow]")
+            return True
 
-        body = {
-            "values": sanitized_values
-        }
+        # Aplica pad/trunc para garantir número fixo de colunas quando solicitado
+        if num_cols is not None:
+            normalized: List[List[Any]] = []
+            for row in sanitized_values:
+                if len(row) >= num_cols:
+                    normalized.append(row[:num_cols])
+                else:
+                    # preenche com strings vazias para manter consistência de colunas
+                    normalized.append(row + [""] * (num_cols - len(row)))
+            sanitized_values = normalized
+
+        body = {"values": sanitized_values}
         
         # Escreve os novos dados usando append
         result = execute_with_retry(sheet.values().append(
@@ -481,6 +479,234 @@ def read_sheet(spreadsheet_id: str, range_name: str) -> List[List[Any]]:
     except Exception as e:
         console.print(f"[red]❌ Erro ao ler planilha: {e}[/red]")
         return []
+
+
+def col_to_letter(col_index: int) -> str:
+    """Converte índice (1-based) de coluna para letra (ex: 1 -> A, 27 -> AA)."""
+    letters = ""
+    while col_index > 0:
+        col_index -= 1
+        letters = chr(ord('A') + (col_index % 26)) + letters
+        col_index //= 26
+    return letters
+
+
+def _sanitize_and_filter_rows(values: List[List[Any]]) -> List[List[Any]]:
+    """Sanitiza valores e remove linhas completamente vazias (todas células nulas/strings vazias).
+
+    Retorna lista sanitizada pronta para enviar à API.
+    """
+    sanitized = []
+    for row in values:
+        if not isinstance(row, list):
+            continue
+        new_row: list[Any] = []
+        for cell in row:
+            if isinstance(cell, (str, int, float, bool)) or cell is None:
+                new_row.append(cell)
+            else:
+                new_row.append(str(cell))
+
+        # Considera vazia se todas as células são None ou string vazia
+        all_empty = True
+        for c in new_row:
+            if c is not None and str(c).strip() != "":
+                all_empty = False
+                break
+
+        if not all_empty:
+            sanitized.append(new_row)
+
+    return sanitized
+
+
+def _get_sheet_metadata(spreadsheet_id: str, sheet_title: str) -> dict | None:
+    """Retorna o objeto 'sheet' (propriedades) para uma aba pelo título, ou None se não existir."""
+    service = get_service()
+    spreadsheet = execute_with_retry(service.spreadsheets().get(spreadsheetId=spreadsheet_id))
+    for sheet in spreadsheet.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("title") == sheet_title:
+            return sheet
+    return None
+
+
+def trim_sheet_rows(spreadsheet_id: str, sheet_title: str, keep_rows: int = 1) -> bool:
+    """Deleta linhas abaixo de `keep_rows` (0-indexed logic: mantém indices 0..keep_rows-1).
+
+    Útil para reduzir gridProperties.rowCount após um `clear` quando se quer manter apenas cabeçalho.
+    """
+    try:
+        service = get_service()
+        sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+        if not sheet_obj:
+            console.print(f"[yellow]⚠️ Aba '{sheet_title}' não encontrada para trimming.[/yellow]")
+            return False
+
+        props = sheet_obj.get("properties", {})
+        sheet_id = props.get("sheetId")
+        current_rows = props.get("gridProperties", {}).get("rowCount", 0)
+
+        # Nada a fazer se já for menor/igual
+        if current_rows <= keep_rows:
+            return True
+
+        delete_request = {
+            "requests": [{
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": keep_rows,
+                        "endIndex": current_rows,
+                    }
+                }
+            }]
+        }
+
+        execute_with_retry(service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body=delete_request
+        ))
+        console.print(f"[green]✅ Aba '{sheet_title}' reduzida para {keep_rows} linhas (removidas {current_rows - keep_rows}).[/green]")
+        return True
+    except HttpError as e:
+        console.print(f"[red]❌ Erro ao reduzir linhas da aba '{sheet_title}': {e}[/red]")
+        return False
+    except Exception as e:
+        console.print(f"[red]❌ Erro inesperado ao reduzir linhas: {e}[/red]")
+        return False
+
+
+def prepare_sheet_for_append(
+    spreadsheet_id: str,
+    sheet_title: str,
+    start_col: str = "A",
+    end_col: str = "M",
+    header_rows: int = 1,
+) -> bool:
+    """Prepara uma aba para append de dados em um range de colunas.
+
+    Passos:
+    1. Limpa o intervalo de dados abaixo do header (ex: A2:M).
+    2. Reduz a grade para manter apenas as linhas de header (usa `trim_sheet_rows`).
+
+    Retorna True se bem sucedido.
+    """
+    try:
+        service = get_service()
+
+        # Garante existência da aba
+        ensure_sheet_exists(service, spreadsheet_id, sheet_title)
+
+        # Garante que a aba tenha linhas suficientes antes de limpar o intervalo
+        sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+        if not sheet_obj:
+            console.print(f"[red]❌ Aba '{sheet_title}' não encontrada após criação.[/red]")
+            return False
+
+        props = sheet_obj.get("properties", {})
+        sheet_id = props.get("sheetId")
+        current_rows = props.get("gridProperties", {}).get("rowCount", 0)
+        required_row_index = header_rows + 1  # linha inicial do clear (1-based)
+
+        if current_rows < required_row_index:
+            # Expande a grade para conter pelo menos required_row_index linhas
+            new_row_count = required_row_index
+            update_req = {
+                "requests": [{
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": sheet_id,
+                            "gridProperties": {"rowCount": new_row_count}
+                        },
+                        "fields": "gridProperties.rowCount"
+                    }
+                }]
+            }
+            execute_with_retry(service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=update_req
+            ))
+            # Recarrega metadata após alteração
+            sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+            props = sheet_obj.get("properties", {})
+            current_rows = props.get("gridProperties", {}).get("rowCount", 0)
+
+        # Limpa A{header_rows+1}:{end_col} (ex: A2:M)
+        clear_range = f"'{sheet_title}'!{start_col}{header_rows + 1}:{end_col}"
+        execute_with_retry(service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=clear_range
+        ))
+
+        # Reduz a grade para o header
+        trim_sheet_rows(spreadsheet_id, sheet_title, keep_rows=header_rows)
+        console.print(f"[green]✅ Aba '{sheet_title}' preparada para append ({start_col}{header_rows+1}:{end_col} limpa).[/green]")
+        return True
+    except Exception as e:
+        console.print(f"[red]❌ Falha ao preparar aba '{sheet_title}' para append: {e}[/red]")
+        return False
+
+
+def cleanup_orphan_rows(spreadsheet_id: str, default_end_col: str = 'Z', per_sheet_col_ends: dict | None = None) -> bool:
+    """Percorre todas as abas e deleta linhas vazias ao final (deleteDimension).
+
+    - `per_sheet_col_ends`: dict opcional {sheet_title: 'M'|'B'...} para controlar colunas lidas.
+    - Por segurança mantém ao menos 1 linha por aba.
+    """
+    try:
+        service = get_service()
+        spreadsheet = execute_with_retry(service.spreadsheets().get(spreadsheetId=spreadsheet_id))
+
+        sheets = spreadsheet.get('sheets', [])
+        for sheet in sheets:
+            props = sheet.get('properties', {})
+            title = props.get('title')
+            sheet_id = props.get('sheetId')
+            if not title:
+                continue
+
+            # Decide fim da coluna para leitura
+            col_end = default_end_col
+            if per_sheet_col_ends and title in per_sheet_col_ends:
+                col_end = per_sheet_col_ends[title]
+            else:
+                low = title.lower()
+                if 'raw_tracking' in low:
+                    col_end = 'M'
+                elif title == 'FORA DE ESTAÇÃO':
+                    col_end = 'B'
+
+            read_range = f"'{title}'!A1:{col_end}"
+            rows = read_sheet(spreadsheet_id, read_range)
+            last_non_empty = len(rows) if rows is not None else 0
+            keep_rows = max(1, last_non_empty)
+
+            current_rows = props.get('gridProperties', {}).get('rowCount', 0)
+            if current_rows > keep_rows:
+                delete_request = {
+                    'requests': [{
+                        'deleteDimension': {
+                            'range': {
+                                'sheetId': sheet_id,
+                                'dimension': 'ROWS',
+                                'startIndex': keep_rows,
+                                'endIndex': current_rows,
+                            }
+                        }
+                    }]
+                }
+                execute_with_retry(service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body=delete_request
+                ))
+                console.print(f"[green]✅ Aba '{title}' reduzida: mantidas {keep_rows} linhas (removidas {current_rows - keep_rows}).[/green]")
+
+        return True
+    except Exception as e:
+        console.print(f"[red]❌ Falha no cleanup de abas: {e}[/red]")
+        return False
 
 _cloud_config_cache: dict | None = None
 

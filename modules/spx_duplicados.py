@@ -267,7 +267,7 @@ def run() -> tuple[Optional[Path], Optional[Path], int]:
             update_sheet(SPREADSHEET_ID, "'FORA DE ESTAÇÃO'!A1", [["BR", "Data Verificação"]], clear_first=False)
 
         console.print(f"[cyan]Salvando {len(fora_estacao_brs)} BRs na aba 'FORA DE ESTAÇÃO'...[/cyan]")
-        append_sheet(SPREADSHEET_ID, "'FORA DE ESTAÇÃO'!A:B", fora_estacao_brs)
+        append_sheet(SPREADSHEET_ID, "'FORA DE ESTAÇÃO'!A:B", fora_estacao_brs, num_cols=2)
 
     # 4. Resumo final
     console.print(f"\n[bold green]✅ TOTAL: {len(all_results)} registros ({skipped} ignorados, {len(fora_estacao_brs)} fora de estação)[/bold green]")

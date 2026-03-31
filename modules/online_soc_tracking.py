@@ -62,14 +62,27 @@ def run_query_base_soc() -> tuple[Path | None, Path | None, int]:
 # Nova função: processa coluna A2:A e salva na aba 'raw_tracking_info'
     total_rows_written = 0
 
-    header_ok = update_sheet(
+    # Prepara a aba: limpa A2:M e reduz a grade para manter apenas o cabeçalho
+    prepared = prepare_sheet_for_append(
         ONLINE_SOC_TRACKING["spreadsheet_id"],
         "raw_tracking_info_RF",
+        start_col="A",
+        end_col="M",
+        header_rows=1,
+    )
+    if not prepared:
+        console.print("[red]❌ Falha ao preparar aba raw_tracking_info_RF.[/red]")
+        return None, None, 0
+
+    # Garante header (escreve em A1 sem limpar a aba inteira)
+    header_ok = update_sheet(
+        ONLINE_SOC_TRACKING["spreadsheet_id"],
+        "raw_tracking_info_RF!A1",
         [OUTPUT_HEADERS],
-        clear_first=True,
+        clear_first=False,
     )
     if not header_ok:
-        console.print("[red]❌ Falha ao preparar aba raw_tracking_info_RF.[/red]")
+        console.print("[red]❌ Falha ao escrever header em raw_tracking_info_RF.[/red]")
         return None, None, 0
 
     indexed_orders = list(enumerate(order_ids))
@@ -113,10 +126,12 @@ def run_query_base_soc() -> tuple[Path | None, Path | None, int]:
                         batch_rows.append(row)
 
             if batch_rows:
+                # Usa append (A-M) — pad/trunc para 13 colunas
                 ok_append = append_sheet(
                     ONLINE_SOC_TRACKING["spreadsheet_id"],
-                    "raw_tracking_info_RF",
+                    "raw_tracking_info_RF!A1",
                     batch_rows,
+                    num_cols=len(OUTPUT_HEADERS),
                 )
                 if not ok_append:
                     console.print(
@@ -154,7 +169,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCo
 
 from core.config import BRT, ONLINE_SOC_TRACKING
 from core.session import get_session
-from core.sheets import append_sheet, read_sheet, update_sheet
+from core.sheets import (
+    append_sheet,
+    read_sheet,
+    update_sheet,
+    col_to_letter,
+    trim_sheet_rows,
+    prepare_sheet_for_append,
+    cleanup_orphan_rows,
+)
 
 console = Console()
 
@@ -539,14 +562,32 @@ def run() -> tuple[Path | None, Path | None, int]:
     batch_size = max(1, batch_size)
     total_rows_written = 0
 
+    # Prepara a aba: limpa A2:M e reduz a grade para manter apenas o cabeçalho
+    out_tab = ONLINE_SOC_TRACKING["output_sheet_tab"]
+    sheet_title = out_tab.split("!")[0] if "!" in out_tab else out_tab
+    if sheet_title.startswith("'") and sheet_title.endswith("'"):
+        sheet_title = sheet_title[1:-1]
+
+    prepared = prepare_sheet_for_append(
+        ONLINE_SOC_TRACKING["spreadsheet_id"],
+        sheet_title,
+        start_col="A",
+        end_col="M",
+        header_rows=1,
+    )
+    if not prepared:
+        console.print("[red]❌ Falha ao preparar aba raw_tracking_info.[/red]")
+        return None, None, 0
+
+    # Garante header (escreve em A1 sem limpar a aba inteira)
     header_ok = update_sheet(
         ONLINE_SOC_TRACKING["spreadsheet_id"],
-        ONLINE_SOC_TRACKING["output_sheet_tab"],
+        f"'{sheet_title}'!A1",
         [OUTPUT_HEADERS],
-        clear_first=True,
+        clear_first=False,
     )
     if not header_ok:
-        console.print("[red]❌ Falha ao preparar aba raw_tracking_info.[/red]")
+        console.print("[red]❌ Falha ao escrever header em raw_tracking_info.[/red]")
         return None, None, 0
 
     indexed_orders = list(enumerate(order_ids))
@@ -589,10 +630,12 @@ def run() -> tuple[Path | None, Path | None, int]:
                         batch_rows.append(row)
 
             if batch_rows:
+                # Usa append (A-M) — pad/trunc para 13 colunas
                 ok_append = append_sheet(
                     ONLINE_SOC_TRACKING["spreadsheet_id"],
-                    ONLINE_SOC_TRACKING["output_sheet_tab"],
+                    f"'{sheet_title}'!A1",
                     batch_rows,
+                    num_cols=len(OUTPUT_HEADERS),
                 )
                 if not ok_append:
                     console.print(
@@ -609,6 +652,12 @@ def run() -> tuple[Path | None, Path | None, int]:
 
     total = rf_count + total_rows_written
     console.print(f"[bold green]✅ Snapshot salvo em raw_tracking_info: {total_rows_written} linhas (RF: {rf_count}, total: {total})[/bold green]")
+    # Pós-processamento: remover linhas órfãs/vazias em todas as abas
+    try:
+        cleanup_orphan_rows(ONLINE_SOC_TRACKING["spreadsheet_id"])
+    except Exception:
+        console.print("[yellow]⚠️ Aviso: falha ao executar cleanup_orphan_rows (continuando).[/yellow]")
+
     return None, None, total
 
 

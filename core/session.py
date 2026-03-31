@@ -9,6 +9,7 @@ Faz refresh automático da sessão quando necessário.
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,6 +43,11 @@ class SPXSession:
         self.session_data: Optional[dict] = None
         self._auto_login_attempted: bool = False  # Evita loop infinito de auto-login
         self._session_lock = threading.RLock()
+        # Controles para evitar múltiplas renovações em curto espaço de tempo
+        self._refresh_attempts: int = 0
+        self._last_refresh_time: float = 0.0
+        # Cooldown em segundos entre tentativas automáticas de refresh
+        self._refresh_cooldown: int = int(os.getenv("SPX_REFRESH_COOLDOWN", "300"))
         self._load_session()
     
     def _load_session(self) -> None:
@@ -164,6 +170,12 @@ class SPXSession:
                         self.session_data[key] = old_session[key]
                         console.print(f"[dim]  ♻️ Preservado {key} da sessão anterior[/dim]")
                 self._create_client()
+                # Reset counters após renovação bem-sucedida
+                self._refresh_attempts = 0
+                # Marca tempo da renovação bem-sucedida para aplicar cooldown
+                self._last_refresh_time = time.time()
+                # Permite futuras renovações após o cooldown, mas evita loops imediatos
+                self._auto_login_attempted = False
 
     def _has_required_material(self) -> bool:
         """Valida artefatos mínimos para evitar 401 em cascata."""
@@ -180,25 +192,35 @@ class SPXSession:
             3. Se falhar localmente → tenta refresh manual
         """
         is_github = os.getenv("GITHUB_ACTIONS") == "true"
-        
-        # Tenta auto-login uma vez (tanto CI quanto local)
+
+        now = time.time()
+
         with self._session_lock:
-            if not self._auto_login_attempted:
-                self._auto_login_attempted = True
-                console.print("[yellow]⚠️ Sessão expirada. Tentando auto-login Google...[/yellow]")
-                
-                try:
-                    self.refresh()
-                    if self._has_required_material():
-                        console.print("[green]✅ Sessão renovada com sucesso via auto-login![/green]")
-                        return
-                    console.print(
-                        "[yellow]⚠️ Renovação retornou sessão incompleta (faltando spx_cid e/ou x-sap).[/yellow]"
+            # Evita múltiplas renovações em curto espaço de tempo usando o timestamp
+            if (now - self._last_refresh_time) < self._refresh_cooldown:
+                console.print(f"[yellow]⚠️ Tentativa de refresh recente (há {now - self._last_refresh_time:.0f}s); pulando nova tentativa automática por {self._refresh_cooldown}s de cooldown.[/yellow]")
+                if is_github:
+                    raise SessionExpiredError(
+                        "Sessão SPX expirada e auto-login recente falhou."
                     )
-                except Exception as e:
-                    console.print(f"[red]❌ Auto-login falhou: {e}[/red]")
-        
-        # Auto-login já tentou e falhou
+                return
+
+            # Marca tentativa e tenta auto-login
+            self._auto_login_attempted = True
+            self._refresh_attempts += 1
+            self._last_refresh_time = now
+            console.print("[yellow]⚠️ Sessão expirada. Tentando auto-login Google...[/yellow]")
+
+            try:
+                self.refresh()
+                if self._has_required_material():
+                    console.print("[green]✅ Sessão renovada com sucesso via auto-login![/green]")
+                    return
+                console.print("[yellow]⚠️ Renovação retornou sessão incompleta (faltando spx_cid e/ou x-sap).[/yellow]")
+            except Exception as e:
+                console.print(f"[red]❌ Auto-login falhou: {e}[/red]")
+
+        # Se chegou aqui, auto-login falhou
         if is_github:
             raise SessionExpiredError(
                 "Sessão SPX expirada e auto-login falhou. "
@@ -206,8 +228,8 @@ class SPXSession:
                 "para sincronizar novamente a CONFIG_CLOUD."
             )
         else:
-            console.print("[yellow]⚠️ Auto-login falhou, tentando renovação manual...[/yellow]")
-            self.refresh()
+            console.print("[yellow]⚠️ Auto-login falhou e não será re-tentado automaticamente agora. Execute 'python main.py --auth' localmente para re-autenticar.[/yellow]")
+            return
     
     def _check_retcode(self, data: dict, url: str) -> None:
         """Verifica retcode da API. Se 401, trata como sessão expirada."""
