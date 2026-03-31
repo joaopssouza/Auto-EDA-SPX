@@ -153,7 +153,7 @@ def run_query_base_soc() -> tuple[Path | None, Path | None, int]:
 Módulo: Online SOC Tracking
 ===========================
 
-Lê Order IDs da aba Online_SOC-MG2, consulta tracking_info por shipment_id
+Lê Order IDs da aba Painel Online_SOC-MG2, consulta tracking_info por shipment_id
 (equivale a tracking details), extrai o último children do último tracking_list,
 expande SPXBR quando existir mais de um e grava snapshot em raw_tracking_info.
 """
@@ -263,7 +263,11 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
         result["pack_eha_msg"] = _to_str(latest_pack_eha.get("status"))
 
     # Definir o station_name conforme a nova regra
-    if latest_station_name:
+    # Se o último evento não vazio for SoC_MG_Betim, prioriza-o. Caso contrário, usa latest_station_name quando existir.
+    last_event_station = _to_str(last_status_event.get("station_name")) if last_status_event else ""
+    if last_event_station == "SoC_MG_Betim":
+        result["station_name"] = last_event_station
+    elif latest_station_name:
         result["station_name"] = latest_station_name
     else:
         # Busca o último station_name não vazio de all_events
@@ -549,7 +553,7 @@ def run() -> tuple[Path | None, Path | None, int]:
 
     order_ids = _read_order_ids()
     if not order_ids:
-        console.print("[yellow]⚠️ Nenhum Order ID encontrado na aba Online_SOC-MG2.[/yellow]")
+        console.print("[yellow]⚠️ Nenhum Order ID encontrado na aba Painel Online_SOC-MG2.[/yellow]")
         # Retorna pelo menos o que foi salvo em RF
         return None, None, rf_count
 

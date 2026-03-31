@@ -120,7 +120,7 @@ SPX_DUPLICADOS = {
     "input_sheet_tab": "'SPX DUPLICADO'!A:A",
 }
 
-# Online SOC Tracking (Online_SOC-MG2 -> raw_tracking_info)
+# Online SOC Tracking (Painel Online_SOC-MG2 -> raw_tracking_info)
 ONLINE_SOC_TRACKING = {
     "spreadsheet_id": _read_env("ONLINE_SOC_SPREADSHEET_ID"),
     "base_status_spreadsheet_id": _read_env("ONLINE_SOC_BASE_STATUS_SPREADSHEET_ID"),
@@ -129,7 +129,7 @@ ONLINE_SOC_TRACKING = {
     "batch_size": 500,
     "delay_between_requests": 0,
     "max_retries": 3,
-    "input_sheet_tab": "'Online_SOC-MG2'!A:A",
+    "input_sheet_tab": "'Painel Online_SOC-MG2'!A:A",
     "output_sheet_tab": "'raw_tracking_info'!A1",
     "base_status_tab": "'BASE STATUS'!A2:B",
 }
