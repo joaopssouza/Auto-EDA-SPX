@@ -221,27 +221,19 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
 
     latest_8_1_10 = None
     latest_pack_eha = None
+    latest_missing = None
     last_status_event = all_events[-1] if all_events else None
 
-    # Busca reversa para pegar o último evento relevante
+    # Busca reversa para pegar os últimos eventos relevantes (packing, soc received, missing)
     for event in reversed(all_events):
         status = str(event.get("status"))
-        # Procura por Packing (9), Return Packing (59) ou EHA (574)
-        if not latest_8_1_10 and status in ("9", "59", "574"):
-            if not latest_pack_eha:
-                latest_pack_eha = event
-        # Procura por SOC/HUB Received (1, 10, 8, 58)
-        elif status in ("1", "10", "8", "58"):
+        if latest_pack_eha is None and status in ("9", "59", "574"):
+            latest_pack_eha = event
+        if latest_8_1_10 is None and status in ("1", "10", "8", "58"):
             latest_8_1_10 = event
-            break
-
-    # Nova lógica: buscar o último station_name diferente de SoC_MG_Betim com status 1,10,8,58,9,59,574
-    latest_station_name = None
-    for event in reversed(all_events):
-        status = str(event.get("status"))
-        station = _to_str(event.get("station_name"))
-        if status in ("1", "10", "8", "58", "9", "59", "574") and station and station != "SoC_MG_Betim":
-            latest_station_name = station
+        if latest_missing is None and status in ("581",):
+            latest_missing = event
+        if latest_pack_eha is not None and latest_8_1_10 is not None and latest_missing is not None:
             break
 
     result = {
@@ -262,25 +254,31 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
         result["pack_eha_ts"] = _format_ts(latest_pack_eha.get("timestamp"))
         result["pack_eha_msg"] = _to_str(latest_pack_eha.get("status"))
 
-    # Definir o station_name conforme a nova regra
-    # Se o último evento não vazio for SoC_MG_Betim, prioriza-o. Caso contrário, usa latest_station_name quando existir.
+    # Definir o station_name conforme prioridade:
+    # 1) se último evento não vazio for SoC_MG_Betim -> preferi-lo
+    # 2) se houver evento Missing (581) mais recente -> usar sua estação
+    # 3) se houver evento SOC/HUB Received (1/10/8/58) -> usar sua estação
+    # 4) fallback: último station não vazio
     last_event_station = _to_str(last_status_event.get("station_name")) if last_status_event else ""
     if last_event_station == "SoC_MG_Betim":
         result["station_name"] = last_event_station
-    elif latest_station_name:
-        result["station_name"] = latest_station_name
     else:
-        # Busca o último station_name não vazio de all_events
-        last_non_empty_station = None
-        for event in reversed(all_events):
-            station = _to_str(event.get("station_name"))
-            if station:
-                last_non_empty_station = station
-                break
-        if last_non_empty_station:
-            result["station_name"] = last_non_empty_station
-        elif last_status_event:
-            result["station_name"] = _to_str(last_status_event.get("station_name"))
+        if latest_missing and _to_str(latest_missing.get("station_name")):
+            result["station_name"] = _to_str(latest_missing.get("station_name"))
+        elif latest_8_1_10 and _to_str(latest_8_1_10.get("station_name")):
+            result["station_name"] = _to_str(latest_8_1_10.get("station_name"))
+        else:
+            # Busca o último station_name não vazio de all_events
+            last_non_empty_station = None
+            for event in reversed(all_events):
+                station = _to_str(event.get("station_name"))
+                if station:
+                    last_non_empty_station = station
+                    break
+            if last_non_empty_station:
+                result["station_name"] = last_non_empty_station
+            elif last_status_event:
+                result["station_name"] = _to_str(last_status_event.get("station_name"))
 
     return result
 
