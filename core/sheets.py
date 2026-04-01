@@ -469,15 +469,61 @@ def insert_rows_at_top(
 
 def read_sheet(spreadsheet_id: str, range_name: str) -> List[List[Any]]:
     """Lê dados de uma aba do Google Sheets."""
+    service = get_service()
+    sheet = service.spreadsheets()
     try:
-        service = get_service()
-        result = execute_with_retry(service.spreadsheets().values().get(
+        result = execute_with_retry(sheet.values().get(
             spreadsheetId=spreadsheet_id,
             range=range_name
         ))
         return result.get('values', [])
+    except HttpError as err:
+        msg = str(err)
+        console.print(f"[red]❌ Erro ao ler planilha: {err}[/red]")
+
+        # Se a API reclamar do range (ex: Unable to parse range), tenta fallback seguro:
+        if "Unable to parse range" in msg or "parse range" in msg:
+            console.print(f"[yellow]⚠️ Range inválido: {range_name}. Tentando fallback seguro...[/yellow]")
+
+            # Extrai nome da aba se possível
+            sheet_title = None
+            if "!" in range_name:
+                sheet_title = range_name.split("!")[0]
+                if sheet_title.startswith("'") and sheet_title.endswith("'"):
+                    sheet_title = sheet_title[1:-1]
+            else:
+                sheet_title = range_name.strip().strip("'")
+
+            if not sheet_title:
+                return []
+
+            # Verifica existência da aba
+            sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+            if not sheet_obj:
+                console.print(f"[yellow]⚠️ Aba '{sheet_title}' não encontrada. Pulando leitura.[/yellow]")
+                return []
+
+            props = sheet_obj.get("properties", {})
+            current_rows = props.get("gridProperties", {}).get("rowCount", 1000)
+            col_count = props.get("gridProperties", {}).get("columnCount", 26)
+            last_col = col_to_letter(col_count or 26)
+
+            # Range explícito A1:<last_col><rows> como fallback
+            fallback_range = f"'{sheet_title}'!A1:{last_col}{current_rows}"
+            console.print(f"[dim]📋 Tentando ler com range de fallback: {fallback_range}[/dim]")
+            try:
+                result = execute_with_retry(sheet.values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range=fallback_range
+                ))
+                return result.get('values', [])
+            except Exception as e2:
+                console.print(f"[red]❌ Falha no fallback de leitura: {e2}[/red]")
+                return []
+
+        return []
     except Exception as e:
-        console.print(f"[red]❌ Erro ao ler planilha: {e}[/red]")
+        console.print(f"[red]❌ Erro inesperado ao ler planilha: {e}[/red]")
         return []
 
 
@@ -551,24 +597,17 @@ def trim_sheet_rows(spreadsheet_id: str, sheet_title: str, keep_rows: int = 1) -
         if current_rows <= keep_rows:
             return True
 
-        delete_request = {
-            "requests": [{
-                "deleteDimension": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "dimension": "ROWS",
-                        "startIndex": keep_rows,
-                        "endIndex": current_rows,
-                    }
-                }
-            }]
-        }
-
-        execute_with_retry(service.spreadsheets().batchUpdate(
+        # Em vez de tentar deletar fisicamente as linhas (deleteDimension) — que pode falhar
+        # quando há linhas congeladas ou regras de proteção — apenas limpamos o conteúdo
+        # das linhas excedentes usando values().clear.
+        last_col = col_to_letter(props.get("gridProperties", {}).get("columnCount", 26) or 26)
+        start_row = keep_rows + 1
+        clear_range = f"'{sheet_title}'!A{start_row}:{last_col}{current_rows}"
+        execute_with_retry(service.spreadsheets().values().clear(
             spreadsheetId=spreadsheet_id,
-            body=delete_request
+            range=clear_range
         ))
-        console.print(f"[green]✅ Aba '{sheet_title}' reduzida para {keep_rows} linhas (removidas {current_rows - keep_rows}).[/green]")
+        console.print(f"[green]✅ Conteúdo limpo em '{sheet_title}' linhas {start_row}-{current_rows} (mantidas {keep_rows}).[/green]")
         return True
     except HttpError as e:
         console.print(f"[red]❌ Erro ao reduzir linhas da aba '{sheet_title}': {e}[/red]")
@@ -685,23 +724,15 @@ def cleanup_orphan_rows(spreadsheet_id: str, default_end_col: str = 'Z', per_she
 
             current_rows = props.get('gridProperties', {}).get('rowCount', 0)
             if current_rows > keep_rows:
-                delete_request = {
-                    'requests': [{
-                        'deleteDimension': {
-                            'range': {
-                                'sheetId': sheet_id,
-                                'dimension': 'ROWS',
-                                'startIndex': keep_rows,
-                                'endIndex': current_rows,
-                            }
-                        }
-                    }]
-                }
-                execute_with_retry(service.spreadsheets().batchUpdate(
+                # Em vez de deletar fisicamente as linhas (o que pode gerar erro quando
+                # tenta remover todas as linhas não-frozen), apenas limpamos o conteúdo
+                # das linhas excedentes.
+                clear_range = f"'{title}'!A{keep_rows+1}:{col_end}{current_rows}"
+                execute_with_retry(service.spreadsheets().values().clear(
                     spreadsheetId=spreadsheet_id,
-                    body=delete_request
+                    range=clear_range
                 ))
-                console.print(f"[green]✅ Aba '{title}' reduzida: mantidas {keep_rows} linhas (removidas {current_rows - keep_rows}).[/green]")
+                console.print(f"[green]✅ Conteúdo limpo em '{title}' linhas {keep_rows+1}-{current_rows} (mantidas {keep_rows}).[/green]")
 
         return True
     except Exception as e:
