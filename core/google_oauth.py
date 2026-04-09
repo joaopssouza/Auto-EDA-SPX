@@ -193,7 +193,15 @@ def _save_token(credentials: Credentials) -> None:
         "scopes": list(credentials.scopes) if credentials.scopes else OAUTH_SCOPES,
     }
 
-    with open(OAUTH_TOKEN_FILE, "w", encoding="utf-8") as f:
+    token_file = str(OAUTH_TOKEN_FILE).strip()
+    if not token_file:
+        raise ValueError("OAUTH_TOKEN_FILE está vazio. Verifique .env/CONFIG_CLOUD.")
+
+    token_parent = Path(token_file).parent
+    if token_parent and not token_parent.exists():
+        token_parent.mkdir(parents=True, exist_ok=True)
+
+    with open(token_file, "w", encoding="utf-8") as f:
         json.dump(token_data, f, indent=2)
 
 

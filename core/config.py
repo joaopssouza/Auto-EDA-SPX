@@ -36,6 +36,12 @@ def _read_env(name: str, default: str = "") -> str:
     return value.strip()
 
 
+def _read_env_or_default(name: str, default: str) -> str:
+    """Retorna `default` quando a env existe, mas está vazia."""
+    value = _read_env(name, default="")
+    return value or default
+
+
 SPX_BASE_URL = _read_env("SPX_BASE_URL")
 
 # Sec tokens
@@ -46,10 +52,10 @@ SAP_SEC_OUTBOUND = os.getenv("SPX_SAP_SEC_OUTBOUND", os.getenv("SPX_SAP_SEC", ""
 SPX_DEVICE_ID = _read_env("SPX_DEVICE_ID")
 
 # Credentials for Auto-Login (OAuth2)
-SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", str(BASE_DIR / "service_account.json"))
-OAUTH_CLIENT_SECRET_FILE = os.getenv("OAUTH_CLIENT_SECRET_FILE", str(BASE_DIR / "oauth_client_secret.json"))
-OAUTH_TOKEN_FILE = os.getenv("OAUTH_TOKEN_FILE", str(BASE_DIR / "oauth_token.json"))
-GOOGLE_SESSION_COOKIES_FILE = os.getenv("GOOGLE_SESSION_COOKIES_FILE", str(BASE_DIR / "google_session_cookies.json"))
+SERVICE_ACCOUNT_FILE = _read_env_or_default("GOOGLE_SERVICE_ACCOUNT_FILE", str(BASE_DIR / "service_account.json"))
+OAUTH_CLIENT_SECRET_FILE = _read_env_or_default("OAUTH_CLIENT_SECRET_FILE", str(BASE_DIR / "oauth_client_secret.json"))
+OAUTH_TOKEN_FILE = _read_env_or_default("OAUTH_TOKEN_FILE", str(BASE_DIR / "oauth_token.json"))
+GOOGLE_SESSION_COOKIES_FILE = _read_env_or_default("GOOGLE_SESSION_COOKIES_FILE", str(BASE_DIR / "google_session_cookies.json"))
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT", "")
 GOOGLE_OAUTH_CLIENT_SECRET_JSON = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
 

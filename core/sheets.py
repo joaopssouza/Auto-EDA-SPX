@@ -149,6 +149,40 @@ def ensure_sheet_exists(service, spreadsheet_id: str, sheet_title: str):
         console.print(f"[red]Erro ao verificar/criar aba: {e}[/red]")
 
 
+def _extract_sheet_title(range_name: str) -> str:
+    """Extrai o título da aba a partir de um range A1."""
+    sheet_title = range_name.split("!")[0] if "!" in range_name else range_name
+    if sheet_title.startswith("'") and sheet_title.endswith("'"):
+        sheet_title = sheet_title[1:-1]
+    return sheet_title.strip()
+
+
+def _extract_start_col(range_name: str) -> str:
+    """Extrai a coluna inicial do range (fallback: A)."""
+    if "!" in range_name:
+        a1 = range_name.split("!", 1)[1]
+    else:
+        a1 = range_name
+
+    start_ref = a1.split(":", 1)[0]
+    letters = "".join(ch for ch in start_ref if ch.isalpha())
+    return letters.upper() or "A"
+
+
+def letter_to_col(col_letter: str) -> int:
+    """Converte letra de coluna (A, AA...) para índice 1-based."""
+    letters = str(col_letter or "").strip().upper()
+    if not letters:
+        return 1
+
+    value = 0
+    for ch in letters:
+        if not ("A" <= ch <= "Z"):
+            continue
+        value = value * 26 + (ord(ch) - ord("A") + 1)
+    return max(1, value)
+
+
 def update_sheet(
     spreadsheet_id: str,
     range_name: str,
@@ -241,13 +275,8 @@ def append_sheet(
     try:
         service = get_service()
         
-        # Extrai o nome da aba do range_name (ex: 'Status SPX'!A1 -> Status SPX)
-        if "!" in range_name:
-            sheet_title = range_name.split("!")[0]
-            # Remove aspas simples se houver
-            if sheet_title.startswith("'") and sheet_title.endswith("'"):
-                sheet_title = sheet_title[1:-1]
-            
+        sheet_title = _extract_sheet_title(range_name)
+        if sheet_title:
             ensure_sheet_exists(service, spreadsheet_id, sheet_title)
 
         sheet = service.spreadsheets()
@@ -271,12 +300,13 @@ def append_sheet(
 
         body = {"values": sanitized_values}
         
-        # Escreve os novos dados usando append
+        # Escreve os novos dados usando append sem forçar inserção de linhas.
+        # OVERWRITE evita crescimento desnecessário da grade e reduz risco de estourar 10M células.
         result = execute_with_retry(sheet.values().append(
             spreadsheetId=spreadsheet_id,
             range=range_name,
             valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
+            insertDataOption="OVERWRITE",
             body=body
         ))
         
@@ -285,6 +315,89 @@ def append_sheet(
         return True
         
     except HttpError as err:
+        err_msg = str(err)
+        # Fallback específico para limite de células do workbook.
+        # Quando INSERT/APPEND não cabe mais, gravamos por update em faixa fixa.
+        if "above the limit of 10000000 cells" in err_msg:
+            try:
+                service = get_service()
+                sheet = service.spreadsheets()
+
+                sheet_title = _extract_sheet_title(range_name)
+                start_col = _extract_start_col(range_name)
+                if not sheet_title:
+                    raise ValueError(f"Range inválido para fallback: {range_name}")
+
+                ensure_sheet_exists(service, spreadsheet_id, sheet_title)
+
+                # Detecta próxima linha livre baseada na coluna inicial.
+                scan_range = f"'{sheet_title}'!{start_col}:{start_col}"
+                scan_result = execute_with_retry(sheet.values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range=scan_range,
+                ))
+                used_rows = len(scan_result.get("values", []))
+                next_row = max(1, used_rows + 1)
+
+                sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+                if not sheet_obj:
+                    raise ValueError(f"Aba não encontrada no fallback: {sheet_title}")
+
+                props = sheet_obj.get("properties", {})
+                grid = props.get("gridProperties", {})
+                current_rows = int(grid.get("rowCount", 0) or 0)
+                column_count = int(grid.get("columnCount", 26) or 26)
+                required_last_row = next_row + len(sanitized_values) - 1
+
+                # Se necessário, tenta expandir somente até o máximo teórico permitido.
+                if required_last_row > current_rows:
+                    max_rows_allowed = max(1, 10_000_000 // max(1, column_count))
+                    if required_last_row > max_rows_allowed:
+                        available = max(0, max_rows_allowed - next_row + 1)
+                        if available <= 0:
+                            console.print(
+                                "[red]❌ Sem espaço de células para escrever novas linhas nesta aba. "
+                                "Reduza o tamanho da planilha.[/red]"
+                            )
+                            return False
+                        console.print(
+                            f"[yellow]⚠️ Limite de células atingido: gravando apenas {available} de {len(sanitized_values)} linhas.[/yellow]"
+                        )
+                        sanitized_values = sanitized_values[:available]
+                        required_last_row = next_row + len(sanitized_values) - 1
+
+                    if required_last_row > current_rows:
+                        update_req = {
+                            "requests": [{
+                                "updateSheetProperties": {
+                                    "properties": {
+                                        "sheetId": props.get("sheetId"),
+                                        "gridProperties": {"rowCount": required_last_row},
+                                    },
+                                    "fields": "gridProperties.rowCount",
+                                }
+                            }]
+                        }
+                        execute_with_retry(service.spreadsheets().batchUpdate(
+                            spreadsheetId=spreadsheet_id,
+                            body=update_req,
+                        ))
+
+                write_range = f"'{sheet_title}'!{start_col}{next_row}"
+                result = execute_with_retry(sheet.values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range=write_range,
+                    valueInputOption="USER_ENTERED",
+                    body={"values": sanitized_values},
+                ))
+                updated_cells = result.get("updatedCells", 0)
+                console.print(
+                    f"[green]✅ Planilha (fallback update): {updated_cells} células adicionadas sem INSERT_ROWS.[/green]"
+                )
+                return True
+            except Exception as fallback_err:
+                console.print(f"[red]❌ Fallback de append falhou: {fallback_err}[/red]")
+
         console.print(f"[red]❌ Erro na API do Google Sheets (append): {err}[/red]")
         return False
     except Exception as e:
@@ -578,9 +691,9 @@ def _get_sheet_metadata(spreadsheet_id: str, sheet_title: str) -> dict | None:
 
 
 def trim_sheet_rows(spreadsheet_id: str, sheet_title: str, keep_rows: int = 1) -> bool:
-    """Deleta linhas abaixo de `keep_rows` (0-indexed logic: mantém indices 0..keep_rows-1).
+    """Reduz a grade de linhas para `keep_rows` quando possível.
 
-    Útil para reduzir gridProperties.rowCount após um `clear` quando se quer manter apenas cabeçalho.
+    Se a redução da grade falhar por restrições da aba, faz fallback limpando conteúdo.
     """
     try:
         service = get_service()
@@ -591,23 +704,45 @@ def trim_sheet_rows(spreadsheet_id: str, sheet_title: str, keep_rows: int = 1) -
 
         props = sheet_obj.get("properties", {})
         sheet_id = props.get("sheetId")
-        current_rows = props.get("gridProperties", {}).get("rowCount", 0)
+        grid = props.get("gridProperties", {})
+        current_rows = int(grid.get("rowCount", 0) or 0)
+        frozen_rows = int(grid.get("frozenRowCount", 0) or 0)
+
+        keep_rows = max(1, int(keep_rows))
+        keep_rows = max(keep_rows, frozen_rows)
 
         # Nada a fazer se já for menor/igual
         if current_rows <= keep_rows:
             return True
 
-        # Em vez de tentar deletar fisicamente as linhas (deleteDimension) — que pode falhar
-        # quando há linhas congeladas ou regras de proteção — apenas limpamos o conteúdo
-        # das linhas excedentes usando values().clear.
-        last_col = col_to_letter(props.get("gridProperties", {}).get("columnCount", 26) or 26)
-        start_row = keep_rows + 1
-        clear_range = f"'{sheet_title}'!A{start_row}:{last_col}{current_rows}"
-        execute_with_retry(service.spreadsheets().values().clear(
-            spreadsheetId=spreadsheet_id,
-            range=clear_range
-        ))
-        console.print(f"[green]✅ Conteúdo limpo em '{sheet_title}' linhas {start_row}-{current_rows} (mantidas {keep_rows}).[/green]")
+        try:
+            update_req = {
+                "requests": [{
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": sheet_id,
+                            "gridProperties": {"rowCount": keep_rows},
+                        },
+                        "fields": "gridProperties.rowCount",
+                    }
+                }]
+            }
+            execute_with_retry(service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=update_req
+            ))
+            console.print(f"[green]✅ Grade reduzida em '{sheet_title}': {current_rows} -> {keep_rows} linhas.[/green]")
+        except Exception:
+            # Fallback seguro: limpa conteúdo excedente sem reduzir grid.
+            last_col = col_to_letter(props.get("gridProperties", {}).get("columnCount", 26) or 26)
+            start_row = keep_rows + 1
+            clear_range = f"'{sheet_title}'!A{start_row}:{last_col}{current_rows}"
+            execute_with_retry(service.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=clear_range
+            ))
+            console.print(f"[yellow]⚠️ Não foi possível reduzir a grade de '{sheet_title}'. Conteúdo limpo em {start_row}-{current_rows}.[/yellow]")
+
         return True
     except HttpError as e:
         console.print(f"[red]❌ Erro ao reduzir linhas da aba '{sheet_title}': {e}[/red]")
@@ -629,6 +764,7 @@ def prepare_sheet_for_append(
     Passos:
     1. Limpa o intervalo de dados abaixo do header (ex: A2:M).
     2. Reduz a grade para manter apenas as linhas de header (usa `trim_sheet_rows`).
+    3. Ajusta número de colunas para o range de destino (ex: A:M -> 13 colunas).
 
     Retorna True se bem sucedido.
     """
@@ -681,6 +817,38 @@ def prepare_sheet_for_append(
 
         # Reduz a grade para o header
         trim_sheet_rows(spreadsheet_id, sheet_title, keep_rows=header_rows)
+
+        # Ajusta a largura da aba para o intervalo usado (A:M, por padrão)
+        sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+        if sheet_obj:
+            props = sheet_obj.get("properties", {})
+            sheet_id = props.get("sheetId")
+            grid = props.get("gridProperties", {})
+            current_cols = int(grid.get("columnCount", 26) or 26)
+            frozen_cols = int(grid.get("frozenColumnCount", 0) or 0)
+            target_cols = max(letter_to_col(end_col), frozen_cols, 1)
+
+            if current_cols != target_cols:
+                col_req = {
+                    "requests": [{
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId": sheet_id,
+                                "gridProperties": {"columnCount": target_cols},
+                            },
+                            "fields": "gridProperties.columnCount",
+                        }
+                    }]
+                }
+                try:
+                    execute_with_retry(service.spreadsheets().batchUpdate(
+                        spreadsheetId=spreadsheet_id,
+                        body=col_req,
+                    ))
+                    console.print(f"[green]✅ Grade de colunas ajustada em '{sheet_title}': {current_cols} -> {target_cols}.[/green]")
+                except Exception as col_err:
+                    console.print(f"[yellow]⚠️ Não foi possível ajustar colunas de '{sheet_title}': {col_err}[/yellow]")
+
         console.print(f"[green]✅ Aba '{sheet_title}' preparada para append ({start_col}{header_rows+1}:{end_col} limpa).[/green]")
         return True
     except Exception as e:
