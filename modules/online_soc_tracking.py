@@ -316,31 +316,16 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
         result["ws_id"] = _to_str(latest_event_with_details.get("ws_id"))
         result["ws_name"] = _to_str(latest_event_with_details.get("ws_name"))
 
-    # Definir o station_name conforme prioridade:
-    # 1) se último evento não vazio for SoC_MG_Betim -> preferi-lo
-    # 2) se houver evento Pending Intercept (570) mais recente -> usar sua estação
-    # 3) se houver evento Missing (581) mais recente -> usar sua estação
-    # 4) se houver evento SOC/HUB Received (1/10/8/58/924) -> usar sua estação
-    # 5) fallback: usar estação do último evento com status 574
-    # 6) fallback genérico: última estação não vazia
-    last_event_station = _to_str(last_status_event.get("station_name")) if last_status_event else ""
-    if last_event_station == "SoC_MG_Betim":
-        result["station_name"] = last_event_station
-    else:
-        if latest_pending_intercept and _to_str(latest_pending_intercept.get("station_name")):
-            result["station_name"] = _to_str(latest_pending_intercept.get("station_name"))
-        elif latest_missing and _to_str(latest_missing.get("station_name")):
-            result["station_name"] = _to_str(latest_missing.get("station_name"))
-        elif latest_8_1_10 and _to_str(latest_8_1_10.get("station_name")):
-            result["station_name"] = _to_str(latest_8_1_10.get("station_name"))
-        elif latest_574 and _to_str(latest_574.get("station_name")):
-            result["station_name"] = _to_str(latest_574.get("station_name"))
-        else:
-            for event in reversed(all_events):
-                station = _to_str(event.get("station_name"))
-                if station:
-                    result["station_name"] = station
-                    break
+    # Definir station_name pela última estação válida no histórico:
+    # não vazia e diferente de "admin".
+    def _is_valid_station(value: str) -> bool:
+        return bool(value) and value.lower() != "admin"
+
+    for event in reversed(all_events):
+        station = _to_str(event.get("station_name"))
+        if _is_valid_station(station):
+            result["station_name"] = station
+            break
 
     return result
 
@@ -579,15 +564,19 @@ def _build_rows_for_order(
     status_desc = status_map.get(status_code, status_code)
     last_ts = _format_ts(event.get("timestamp"))
 
-    soc_received_raw = data.get("current_station_received_time")
-    soc_received = _format_ts(soc_received_raw)
+    soc_info = _extract_latest_soc_status(data)
+
+    # Prioriza o timestamp do último SOC/HUB Received para manter coerência
+    # com o status de SOC/HUB Received exibido nas colunas dedicadas.
+    soc_received = soc_info["status_8_1_10_ts"] if soc_info["status_8_1_10_ts"] not in {"", "-"} else ""
+    if not soc_received:
+        soc_received_raw = data.get("current_station_received_time")
+        soc_received = _format_ts(soc_received_raw)
     if not soc_received:
         soc_received = last_ts
 
     tag_value = _extract_soc_received_tag(data, event)
     spx_list = _extract_spx_list(data)
-
-    soc_info = _extract_latest_soc_status(data)
 
     # Traduz status para descrição usando BASE STATUS
     status_8_1_10_desc = status_map.get(soc_info["status_8_1_10_msg"], soc_info["status_8_1_10_msg"])
