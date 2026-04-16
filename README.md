@@ -49,7 +49,9 @@ A execução é baseada em flags, permitindo rodar processos específicos ou em 
 2.  Instale as dependências:
 
     ```bash
-    pip install -r requirements.txt
+    PS D:\PROJETOS\Auto-EDA-SPX> python -m venv venv
+    PS D:\PROJETOS\Auto-EDA-SPX> .\venv\Scripts\Activate.ps1
+    (venv) PS D:\PROJETOS\Auto-EDA-SPX> python -m pip install -r requirements.txt
     ```
 
 3.  Configure as variáveis de ambiente:

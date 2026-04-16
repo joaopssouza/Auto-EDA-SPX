@@ -191,18 +191,23 @@ OUTPUT_HEADERS = [
     "HUB/SOC Received (1/10/8/58) Timestamp",  # Atualizado
     "HUB/SOC Received (1/10/8/58) Status",     # Atualizado
     "HUB/SOC Received Tags",              
-    "Pack / EHA (9/59/574) Timestamp",# Atualizado
+    "Pack / EHA (9/59/574/570/571/11/18/928/929) Timestamp",  # Atualizado
     "Pack / EHA Status",              # Atualizado
+    "message",
+    "operator",
+    "ws_id",
+    "ws_name",
 ]
 
 
 def _reset_output_sheet(sheet_title: str) -> bool:
     """Limpa a aba de saída e mantém apenas o cabeçalho (linha 1)."""
+    end_col = col_to_letter(len(OUTPUT_HEADERS))
     prepared = prepare_sheet_for_append(
         ONLINE_SOC_TRACKING["spreadsheet_id"],
         sheet_title,
         start_col="A",
-        end_col="M",
+        end_col=end_col,
         header_rows=1,
     )
     if not prepared:
@@ -230,7 +235,7 @@ def _finalize_output_sheet(sheet_title: str, data_rows: int) -> bool:
         )
     return ok
 
-# Etapa 2: Função para extrair status 8, 9, 574
+# Etapa 2: Função para extrair status consolidados
 def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
     tracking_list = data.get("tracking_list", [])
     if not isinstance(tracking_list, list):
@@ -252,19 +257,35 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
 
     latest_8_1_10 = None
     latest_pack_eha = None
+    latest_pending_intercept = None
     latest_missing = None
+    latest_574 = None
+    latest_event_with_details = None
     last_status_event = all_events[-1] if all_events else None
 
     # Busca reversa para pegar os últimos eventos relevantes (packing, soc received, missing)
     for event in reversed(all_events):
         status = str(event.get("status"))
-        if latest_pack_eha is None and status in ("9", "59", "574"):
+        if latest_pack_eha is None and status in ("9", "59", "574", "570", "571", "11", "18", "928", "929"):
             latest_pack_eha = event
+        if latest_pending_intercept is None and status == "570":
+            latest_pending_intercept = event
         if latest_8_1_10 is None and status in ("1", "10", "8", "58"):
             latest_8_1_10 = event
         if latest_missing is None and status in ("581",):
             latest_missing = event
-        if latest_pack_eha is not None and latest_8_1_10 is not None and latest_missing is not None:
+        if latest_574 is None and status == "574":
+            latest_574 = event
+        if latest_event_with_details is None and status in ("571", "928", "929", "8", "58"):
+            latest_event_with_details = event
+        if (
+            latest_pack_eha is not None
+            and latest_pending_intercept is not None
+            and latest_8_1_10 is not None
+            and latest_missing is not None
+            and latest_574 is not None
+            and latest_event_with_details is not None
+        ):
             break
 
     result = {
@@ -273,7 +294,11 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
         "status_8_1_10_msg": "-",
         "tags": "-",
         "pack_eha_ts": "NÃO FOI PROCESSADO",
-        "pack_eha_msg": "NÃO FOI PROCESSADO"
+        "pack_eha_msg": "NÃO FOI PROCESSADO",
+        "message": "",
+        "operator": "",
+        "ws_id": "",
+        "ws_name": "",
     }
 
     if latest_8_1_10:
@@ -285,31 +310,30 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
         result["pack_eha_ts"] = _format_ts(latest_pack_eha.get("timestamp"))
         result["pack_eha_msg"] = _to_str(latest_pack_eha.get("status"))
 
+    if latest_event_with_details:
+        result["message"] = _to_str(latest_event_with_details.get("message"))
+        result["operator"] = _to_str(latest_event_with_details.get("operator"))
+        result["ws_id"] = _to_str(latest_event_with_details.get("ws_id"))
+        result["ws_name"] = _to_str(latest_event_with_details.get("ws_name"))
+
     # Definir o station_name conforme prioridade:
     # 1) se último evento não vazio for SoC_MG_Betim -> preferi-lo
-    # 2) se houver evento Missing (581) mais recente -> usar sua estação
-    # 3) se houver evento SOC/HUB Received (1/10/8/58) -> usar sua estação
-    # 4) fallback: último station não vazio
+    # 2) se houver evento Pending Intercept (570) mais recente -> usar sua estação
+    # 3) se houver evento Missing (581) mais recente -> usar sua estação
+    # 4) se houver evento SOC/HUB Received (1/10/8/58) -> usar sua estação
+    # 5) fallback: usar estação do último evento com status 574
     last_event_station = _to_str(last_status_event.get("station_name")) if last_status_event else ""
     if last_event_station == "SoC_MG_Betim":
         result["station_name"] = last_event_station
     else:
-        if latest_missing and _to_str(latest_missing.get("station_name")):
+        if latest_pending_intercept and _to_str(latest_pending_intercept.get("station_name")):
+            result["station_name"] = _to_str(latest_pending_intercept.get("station_name"))
+        elif latest_missing and _to_str(latest_missing.get("station_name")):
             result["station_name"] = _to_str(latest_missing.get("station_name"))
         elif latest_8_1_10 and _to_str(latest_8_1_10.get("station_name")):
             result["station_name"] = _to_str(latest_8_1_10.get("station_name"))
-        else:
-            # Busca o último station_name não vazio de all_events
-            last_non_empty_station = None
-            for event in reversed(all_events):
-                station = _to_str(event.get("station_name"))
-                if station:
-                    last_non_empty_station = station
-                    break
-            if last_non_empty_station:
-                result["station_name"] = last_non_empty_station
-            elif last_status_event:
-                result["station_name"] = _to_str(last_status_event.get("station_name"))
+        elif latest_574 and _to_str(latest_574.get("station_name")):
+            result["station_name"] = _to_str(latest_574.get("station_name"))
 
     return result
 
@@ -487,7 +511,30 @@ def _extract_soc_received_tag(data: dict[str, Any], fallback_event: dict[str, An
                 if found:
                     return found
 
-    return _extract_tag_value(fallback_event)
+    # Mantém o fallback no evento atual; se vazio, volta no histórico para buscar a última tag não vazia.
+    fallback_tag = _extract_tag_value(fallback_event)
+    if fallback_tag:
+        return fallback_tag
+
+    if isinstance(tracking_list, list):
+        all_events: list[dict[str, Any]] = []
+        for tracking in tracking_list:
+            if not isinstance(tracking, dict):
+                continue
+            all_events.append(tracking)
+            children = tracking.get("children", [])
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict):
+                        all_events.append(child)
+
+        all_events.sort(key=lambda x: _to_int(x.get("timestamp")) or 0)
+        for event in reversed(all_events):
+            found = _extract_tag_value(event)
+            if found:
+                return found
+
+    return ""
 
 
 def _fetch_tracking_info(session: Any, shipment_id: str) -> dict[str, Any] | None:
@@ -555,6 +602,10 @@ def _build_rows_for_order(
             soc_info["tags"],
             soc_info["pack_eha_ts"],
             pack_eha_desc,
+            soc_info["message"],
+            soc_info["operator"],
+            soc_info["ws_id"],
+            soc_info["ws_name"],
         ])
 
     return rows
