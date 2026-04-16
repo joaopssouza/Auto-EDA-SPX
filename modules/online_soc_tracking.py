@@ -188,10 +188,10 @@ OUTPUT_HEADERS = [
     "Status Code",
     "Tag",
     "Latest HUB/SOC Station",             
-    "HUB/SOC Received (1/10/8/58) Timestamp",  # Atualizado
-    "HUB/SOC Received (1/10/8/58) Status",     # Atualizado
+    "HUB/SOC Received (1/10/8/58/924) Timestamp",  # Atualizado
+    "HUB/SOC Received (1/10/8/58/924) Status",     # Atualizado
     "HUB/SOC Received Tags",              
-    "Pack / EHA (9/59/574/570/571/11/18/928/929) Timestamp",  # Atualizado
+    "Pack / EHA (9/59/574/570/571/11/18/928/929/36/65) Timestamp",  # Atualizado
     "Pack / EHA Status",              # Atualizado
     "message",
     "operator",
@@ -266,11 +266,11 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
     # Busca reversa para pegar os últimos eventos relevantes (packing, soc received, missing)
     for event in reversed(all_events):
         status = str(event.get("status"))
-        if latest_pack_eha is None and status in ("9", "59", "574", "570", "571", "11", "18", "928", "929"):
+        if latest_pack_eha is None and status in ("9", "59", "574", "570", "571", "11", "18", "928", "929", "36", "65"):
             latest_pack_eha = event
         if latest_pending_intercept is None and status == "570":
             latest_pending_intercept = event
-        if latest_8_1_10 is None and status in ("1", "10", "8", "58"):
+        if latest_8_1_10 is None and status in ("1", "10", "8", "58", "924"):
             latest_8_1_10 = event
         if latest_missing is None and status in ("581",):
             latest_missing = event
@@ -320,8 +320,9 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
     # 1) se último evento não vazio for SoC_MG_Betim -> preferi-lo
     # 2) se houver evento Pending Intercept (570) mais recente -> usar sua estação
     # 3) se houver evento Missing (581) mais recente -> usar sua estação
-    # 4) se houver evento SOC/HUB Received (1/10/8/58) -> usar sua estação
+    # 4) se houver evento SOC/HUB Received (1/10/8/58/924) -> usar sua estação
     # 5) fallback: usar estação do último evento com status 574
+    # 6) fallback genérico: última estação não vazia
     last_event_station = _to_str(last_status_event.get("station_name")) if last_status_event else ""
     if last_event_station == "SoC_MG_Betim":
         result["station_name"] = last_event_station
@@ -334,6 +335,12 @@ def _extract_latest_soc_status(data: dict[str, Any]) -> dict[str, str]:
             result["station_name"] = _to_str(latest_8_1_10.get("station_name"))
         elif latest_574 and _to_str(latest_574.get("station_name")):
             result["station_name"] = _to_str(latest_574.get("station_name"))
+        else:
+            for event in reversed(all_events):
+                station = _to_str(event.get("station_name"))
+                if station:
+                    result["station_name"] = station
+                    break
 
     return result
 
