@@ -169,6 +169,74 @@ def _extract_start_col(range_name: str) -> str:
     return letters.upper() or "A"
 
 
+def _extract_start_row(range_name: str) -> int | None:
+    """Extrai a linha inicial do range (ex: A2 -> 2)."""
+    if "!" in range_name:
+        a1 = range_name.split("!", 1)[1]
+    else:
+        a1 = range_name
+
+    start_ref = a1.split(":", 1)[0]
+    digits = "".join(ch for ch in start_ref if ch.isdigit())
+    if not digits:
+        return None
+
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _ensure_sheet_row_capacity(
+    spreadsheet_id: str,
+    sheet_title: str,
+    required_last_row: int,
+) -> bool:
+    """Garante que a aba tenha ao menos `required_last_row` linhas."""
+    sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+    if not sheet_obj:
+        console.print(f"[red]❌ Aba '{sheet_title}' não encontrada para ajuste de grade.[/red]")
+        return False
+
+    props = sheet_obj.get("properties", {})
+    sheet_id = props.get("sheetId")
+    grid = props.get("gridProperties", {})
+    current_rows = int(grid.get("rowCount", 0) or 0)
+    column_count = int(grid.get("columnCount", 26) or 26)
+
+    if required_last_row <= current_rows:
+        return True
+
+    max_rows_allowed = max(1, 10_000_000 // max(1, column_count))
+    if required_last_row > max_rows_allowed:
+        console.print(
+            "[red]❌ Sem espaço de células para expandir a aba "
+            f"'{sheet_title}' até {required_last_row} linhas (máx: {max_rows_allowed}).[/red]"
+        )
+        return False
+
+    update_req = {
+        "requests": [{
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sheet_id,
+                    "gridProperties": {"rowCount": required_last_row},
+                },
+                "fields": "gridProperties.rowCount",
+            }
+        }]
+    }
+    service = get_service()
+    execute_with_retry(service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body=update_req,
+    ))
+    console.print(
+        f"[green]✅ Grade de linhas ajustada em '{sheet_title}': {current_rows} -> {required_last_row}.[/green]"
+    )
+    return True
+
+
 def letter_to_col(col_letter: str) -> int:
     """Converte letra de coluna (A, AA...) para índice 1-based."""
     letters = str(col_letter or "").strip().upper()
@@ -248,6 +316,41 @@ def update_sheet(
         return True
         
     except HttpError as err:
+        err_msg = str(err)
+
+        # Fallback para escrita que excede limites da grade da aba.
+        # Ex.: "Range (...!A7002) exceeds grid limits. Max rows: 7001"
+        if "exceeds grid limits" in err_msg:
+            try:
+                sheet_title = _extract_sheet_title(range_name)
+                start_col = _extract_start_col(range_name)
+                start_row = _extract_start_row(range_name) or 1
+
+                retry_values = _sanitize_and_filter_rows(values)
+                if not retry_values:
+                    return True
+
+                required_last_row = start_row + len(retry_values) - 1
+                if not _ensure_sheet_row_capacity(spreadsheet_id, sheet_title, required_last_row):
+                    return False
+
+                service = get_service()
+                sheet = service.spreadsheets()
+                retry_range = f"'{sheet_title}'!{start_col}{start_row}"
+                result = execute_with_retry(sheet.values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range=retry_range,
+                    valueInputOption="USER_ENTERED",
+                    body={"values": retry_values},
+                ))
+                updated_cells = result.get('updatedCells', 0)
+                console.print(
+                    f"[green]✅ Planilha atualizada após ajuste de grade: {updated_cells} células alteradas.[/green]"
+                )
+                return True
+            except Exception as retry_err:
+                console.print(f"[red]❌ Falha no fallback de ajuste de grade: {retry_err}[/red]")
+
         console.print(f"[red]❌ Erro na API do Google Sheets: {err}[/red]")
         return False
     except Exception as e:
@@ -749,6 +852,43 @@ def trim_sheet_rows(spreadsheet_id: str, sheet_title: str, keep_rows: int = 1) -
         return False
     except Exception as e:
         console.print(f"[red]❌ Erro inesperado ao reduzir linhas: {e}[/red]")
+        return False
+
+
+def shrink_sheet_if_oversized(
+    spreadsheet_id: str,
+    sheet_title: str,
+    needed_rows: int,
+    threshold_rows: int = 20_000,
+) -> bool:
+    """Se a aba estiver acima de `threshold_rows`, reduz para `needed_rows`.
+
+    Útil para evitar crescimento desnecessário de grade entre execuções longas.
+    """
+    try:
+        sheet_obj = _get_sheet_metadata(spreadsheet_id, sheet_title)
+        if not sheet_obj:
+            console.print(f"[yellow]⚠️ Aba '{sheet_title}' não encontrada para verificação de tamanho.[/yellow]")
+            return False
+
+        props = sheet_obj.get("properties", {})
+        grid = props.get("gridProperties", {})
+        current_rows = int(grid.get("rowCount", 0) or 0)
+
+        if current_rows <= int(threshold_rows):
+            return True
+
+        target_rows = max(1, int(needed_rows))
+        if target_rows >= current_rows:
+            return True
+
+        console.print(
+            f"[yellow]⚠️ Aba '{sheet_title}' com {current_rows} linhas (> {threshold_rows}). "
+            f"Ajustando para {target_rows} conforme necessidade da consulta.[/yellow]"
+        )
+        return trim_sheet_rows(spreadsheet_id, sheet_title, keep_rows=target_rows)
+    except Exception as e:
+        console.print(f"[red]❌ Erro ao verificar tamanho da aba '{sheet_title}': {e}[/red]")
         return False
 
 

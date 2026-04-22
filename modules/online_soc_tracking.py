@@ -49,6 +49,15 @@ def run_query_base_soc() -> tuple[Path | None, Path | None, int]:
         console.print("[red]❌ Falha ao preparar aba raw_tracking_info_RF.[/red]")
         return None, None, 0
 
+    # Se a grade estiver superdimensionada, reduz para o necessário desta consulta.
+    estimated_needed_rows_rf = _estimate_needed_rows(len(order_ids))
+    shrink_sheet_if_oversized(
+        ONLINE_SOC_TRACKING["spreadsheet_id"],
+        "raw_tracking_info_RF",
+        needed_rows=estimated_needed_rows_rf,
+        threshold_rows=20_000,
+    )
+
     if order_ids:
         sample = ", ".join(order_ids[:5])
         console.print(f"[blue]🔎 Amostra (até 5): {sample}[/blue]")
@@ -173,6 +182,7 @@ from core.sheets import (
     col_to_letter,
     trim_sheet_rows,
     prepare_sheet_for_append,
+    shrink_sheet_if_oversized,
 )
 
 console = Console()
@@ -198,6 +208,16 @@ OUTPUT_HEADERS = [
     "ws_id",
     "ws_name",
 ]
+
+
+def _estimate_needed_rows(order_count: int) -> int:
+    """Estima linhas necessárias com folga para reduzir ajustes repetitivos de grade."""
+    base = max(1, int(order_count))
+    factor = float(ONLINE_SOC_TRACKING.get("row_capacity_factor", 1.6))
+    extra = int(ONLINE_SOC_TRACKING.get("row_capacity_extra", 1000))
+
+    estimated_data_rows = max(base, int(base * max(1.0, factor)) + max(0, extra))
+    return 1 + estimated_data_rows
 
 
 def _reset_output_sheet(sheet_title: str) -> bool:
@@ -640,6 +660,15 @@ def run() -> tuple[Path | None, Path | None, int]:
     if not _reset_output_sheet(sheet_title):
         console.print("[red]❌ Falha ao preparar aba raw_tracking_info.[/red]")
         return None, None, 0
+
+    # Se a grade estiver superdimensionada, reduz para o necessário desta consulta.
+    estimated_needed_rows = _estimate_needed_rows(len(order_ids))
+    shrink_sheet_if_oversized(
+        ONLINE_SOC_TRACKING["spreadsheet_id"],
+        sheet_title,
+        needed_rows=estimated_needed_rows,
+        threshold_rows=20_000,
+    )
 
     if not order_ids:
         console.print("[yellow]⚠️ Nenhum Order ID encontrado na aba Painel Online_SOC-MG2.[/yellow]")
