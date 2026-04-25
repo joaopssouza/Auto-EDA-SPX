@@ -22,6 +22,95 @@ console = Console()
 
 MODULE_NAME = "escalation_ticket"
 
+# Mapeamento de status (1-4) para descrição legível
+STATUS_MAP = {
+    1: "Created",
+    2: "Reviewing",
+    3: "Resolved",
+    4: "Cancelled",
+}
+
+DATETIME_FIELDS = ("end_time", "ctime")
+
+
+def _map_ticket_status_in_items(items: list[dict]) -> None:
+    """Converte valores numéricos de `ticket_status` para as descrições.
+
+    Modifica os dicionários in-place.
+    """
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+
+        if "ticket_status" not in it:
+            continue
+
+        val = it.get("ticket_status")
+        try:
+            # aceita números inteiros e strings numéricas
+            if isinstance(val, str) and val.isdigit():
+                key = int(val)
+            elif isinstance(val, (int, float)):
+                key = int(val)
+            else:
+                # já é uma string descritiva ou formato inesperado
+                continue
+
+            it["ticket_status"] = STATUS_MAP.get(key, it.get("ticket_status"))
+        except Exception:
+            # não falhar a execução por causa de um valor inesperado
+            continue
+
+
+def _to_epoch_seconds(value) -> int | None:
+    """Normaliza timestamp epoch para segundos (suporta ms)."""
+    if value is None or isinstance(value, bool):
+        return None
+
+    try:
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            num = int(float(raw))
+        elif isinstance(value, (int, float)):
+            num = int(value)
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    # Heurística para timestamps em milissegundos
+    if abs(num) > 10_000_000_000:
+        num = num // 1000
+
+    return num
+
+
+def _format_epoch_to_brt(value):
+    """Converte epoch para string dd/mm/aaaa HH:MM:SS no fuso BRT."""
+    epoch_seconds = _to_epoch_seconds(value)
+    if epoch_seconds is None:
+        return value
+
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=BRT).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return value
+
+
+def _map_datetime_fields_in_items(items: list[dict]) -> None:
+    """Converte campos epoch (`end_time`, `ctime`) para data/hora em BRT."""
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+
+        for field in DATETIME_FIELDS:
+            if field not in it:
+                continue
+
+            it[field] = _format_epoch_to_brt(it.get(field))
+
 
 def fetch_escalation_tickets(
     start_date: datetime,
@@ -72,7 +161,21 @@ def fetch_escalation_tickets(
             
             if not items:
                 break
-            
+
+            # Converte códigos numéricos de ticket_status para descrições legíveis
+            try:
+                _map_ticket_status_in_items(items)
+            except Exception:
+                # Não interrompe a extração se o mapeamento falhar
+                pass
+
+            # Converte campos de data (epoch) para data/hora local (UTC-3)
+            try:
+                _map_datetime_fields_in_items(items)
+            except Exception:
+                # Não interrompe a extração se a conversão falhar
+                pass
+
             all_data.extend(items)
             console.print(f"  Página {page}: +{len(items)} ({len(all_data)}/{total_expected})")
             
