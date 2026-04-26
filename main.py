@@ -25,6 +25,11 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Garante que a raiz do projeto esteja no PYTHONPATH antes de importar pacotes locais.
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from core.config import BRT
 
 def now_brt() -> datetime:
@@ -34,9 +39,6 @@ def now_brt() -> datetime:
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-
-# Adiciona diretório ao path
-sys.path.insert(0, str(Path(__file__).parent))
 
 from core.auth import authenticate, load_session, is_session_material_valid
 from core.session import get_session

@@ -8,6 +8,7 @@ Operação: GET de Escalation Ticket.
 Divide o período em chunks para contornar o limite de 10k do Elasticsearch.
 """
 
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -32,6 +33,17 @@ STATUS_MAP = {
 
 DATETIME_FIELDS = ("end_time", "ctime")
 
+ASSIGNEE_TYPE_LABELS = {
+    "1": "Admin",
+    "2": "Station Lead",
+    "3": "Station",
+}
+
+_AGING_TIME_PATTERN = re.compile(
+    r"^(?:(?P<days>\d+)d)?(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)min)?$",
+    re.IGNORECASE,
+)
+
 
 def _map_ticket_status_in_items(items: list[dict]) -> None:
     """Converte valores numéricos de `ticket_status` para as descrições.
@@ -47,18 +59,15 @@ def _map_ticket_status_in_items(items: list[dict]) -> None:
 
         val = it.get("ticket_status")
         try:
-            # aceita números inteiros e strings numéricas
             if isinstance(val, str) and val.isdigit():
                 key = int(val)
             elif isinstance(val, (int, float)):
                 key = int(val)
             else:
-                # já é uma string descritiva ou formato inesperado
                 continue
 
             it["ticket_status"] = STATUS_MAP.get(key, it.get("ticket_status"))
         except Exception:
-            # não falhar a execução por causa de um valor inesperado
             continue
 
 
@@ -80,7 +89,6 @@ def _to_epoch_seconds(value) -> int | None:
     except (TypeError, ValueError):
         return None
 
-    # Heurística para timestamps em milissegundos
     if abs(num) > 10_000_000_000:
         num = num // 1000
 
@@ -110,6 +118,96 @@ def _map_datetime_fields_in_items(items: list[dict]) -> None:
                 continue
 
             it[field] = _format_epoch_to_brt(it.get(field))
+
+
+def _normalize_assignee_type(value: object) -> str:
+    """Converte o código de assignee_type para uma descrição legível."""
+    if value is None:
+        return ""
+
+    key = str(value).strip()
+    if not key:
+        return ""
+
+    return ASSIGNEE_TYPE_LABELS.get(key, key)
+
+
+def _normalize_response_sla(value: object) -> str:
+    """Normaliza response_sla para um texto de data/hora consistente."""
+    if value is None:
+        return ""
+
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, tz=BRT).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            pass
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    candidate_texts = [text, text.replace("Z", "+00:00")]
+    candidate_formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ]
+
+    for candidate in candidate_texts:
+        for candidate_format in candidate_formats:
+            try:
+                return datetime.strptime(candidate, candidate_format).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+
+        try:
+            return datetime.fromisoformat(candidate).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+
+    return text
+
+
+def _normalize_aging_time(value: object) -> int | str:
+    """Converte aging_time para minutos totais quando vier no formato 14h 10min."""
+    if value is None:
+        return ""
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+
+    text = str(value).strip().lower()
+    if not text:
+        return ""
+
+    compact = text.replace(" ", "")
+    match = _AGING_TIME_PATTERN.fullmatch(compact)
+    if not match:
+        return text
+
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+
+    return (days * 24 * 60) + (hours * 60) + minutes
+
+
+def _enrich_escalation_ticket(item: dict) -> dict:
+    """Preserva o payload original e adiciona normalizações do escalation."""
+    enriched_item = dict(item)
+    enriched_item["ticket_status"] = enriched_item.get("ticket_status")
+    enriched_item["assignee_type_label"] = _normalize_assignee_type(enriched_item.get("assignee_type"))
+    enriched_item["response_sla"] = _normalize_response_sla(enriched_item.get("response_sla"))
+    enriched_item["aging_time"] = _normalize_aging_time(enriched_item.get("aging_time"))
+    return enriched_item
 
 
 def fetch_escalation_tickets(
@@ -176,7 +274,11 @@ def fetch_escalation_tickets(
                 # Não interrompe a extração se a conversão falhar
                 pass
 
-            all_data.extend(items)
+            all_data.extend(
+                _enrich_escalation_ticket(item)
+                for item in items
+                if isinstance(item, dict)
+            )
             console.print(f"  Página {page}: +{len(items)} ({len(all_data)}/{total_expected})")
             
             if len(all_data) >= total_expected or len(all_data) >= 10000:
