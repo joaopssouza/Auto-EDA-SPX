@@ -39,8 +39,8 @@ ASSIGNEE_TYPE_LABELS = {
     "3": "Station",
 }
 
-_AGING_TIME_PATTERN = re.compile(
-    r"^(?:(?P<days>\d+)d)?(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)min)?$",
+_AGING_TIME_TOKEN_PATTERN = re.compile(
+    r"(?P<value>\d+)\s*(?P<unit>d|dia|dias|h|hora|horas|m|min|mins|minuto|minutos)",
     re.IGNORECASE,
 )
 
@@ -176,35 +176,69 @@ def _normalize_response_sla(value: object) -> str:
     return text
 
 
-def _normalize_aging_time(value: object) -> int | str:
-    """Converte aging_time para minutos totais quando vier no formato 14h 10min."""
+def _format_minutes_to_duration(total_minutes: int) -> str:
+    """Formata minutos totais no padrão Xd Yh Zm."""
+    if total_minutes <= 0:
+        return "0m"
+
+    days, remainder = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(remainder, 60)
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+
+    return " ".join(parts)
+
+
+def _normalize_aging_time(value: object) -> str:
+    """Converte aging_time para duração legível (ex: 2d 11h 30m)."""
     if value is None:
         return ""
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return int(value)
+        # Valores numéricos vindos da API normalmente chegam em segundos.
+        total_minutes = int(float(value) // 60)
+        return _format_minutes_to_duration(total_minutes)
 
     text = str(value).strip().lower()
     if not text:
         return ""
 
-    compact = text.replace(" ", "")
-    match = _AGING_TIME_PATTERN.fullmatch(compact)
-    if not match:
+    if text.isdigit():
+        total_minutes = int(text) // 60
+        return _format_minutes_to_duration(total_minutes)
+
+    total_minutes = 0
+    found_any = False
+    for match in _AGING_TIME_TOKEN_PATTERN.finditer(text):
+        found_any = True
+        token_value = int(match.group("value") or 0)
+        unit = (match.group("unit") or "").lower()
+
+        if unit in {"d", "dia", "dias"}:
+            total_minutes += token_value * 24 * 60
+        elif unit in {"h", "hora", "horas"}:
+            total_minutes += token_value * 60
+        else:
+            total_minutes += token_value
+
+    if not found_any:
         return text
 
-    days = int(match.group("days") or 0)
-    hours = int(match.group("hours") or 0)
-    minutes = int(match.group("minutes") or 0)
-
-    return (days * 24 * 60) + (hours * 60) + minutes
+    return _format_minutes_to_duration(total_minutes)
 
 
 def _enrich_escalation_ticket(item: dict) -> dict:
     """Preserva o payload original e adiciona normalizações do escalation."""
     enriched_item = dict(item)
     enriched_item["ticket_status"] = enriched_item.get("ticket_status")
-    enriched_item["assignee_type_label"] = _normalize_assignee_type(enriched_item.get("assignee_type"))
+    assignee_type_label = _normalize_assignee_type(enriched_item.get("assignee_type"))
+    enriched_item["assignee_type"] = assignee_type_label
     enriched_item["response_sla"] = _normalize_response_sla(enriched_item.get("response_sla"))
     enriched_item["aging_time"] = _normalize_aging_time(enriched_item.get("aging_time"))
     return enriched_item
